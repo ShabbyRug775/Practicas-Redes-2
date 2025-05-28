@@ -32,7 +32,7 @@ public class servidor {
         JLabel clientLabel = new JLabel("Servidor:");
         JTextField clientField = new JTextField("127.0.0.1", 15); // Campo para la IP del cliente
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5); // Campo para el puerto diferente al del servidor
+        JTextField portField = new JTextField("8001", 5); // Campo para el puerto diferente al del servidor
         clientPanel.add(clientLabel);
         clientPanel.add(clientField);
         clientPanel.add(portLabel);
@@ -322,7 +322,7 @@ public class servidor {
 
                     // Envía el archivo en bloques
                     while (enviados < tam) {
-                        byte[] b = new byte[5500];
+                        byte[] b = new byte[3500];
                         l = dis.read(b);
                         if (l == -1) break; // fin de archivo
                         dos.write(b, 0, l);
