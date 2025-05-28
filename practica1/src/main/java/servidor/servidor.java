@@ -13,6 +13,7 @@ public class servidor {
 
     // Componentes de la interfaz gráfica y variables de estado
     private static JTextArea statusArea;            // Área de texto para mostrar el estado del servidor
+    private static File selectedFile;               // Archivo seleccionado para enviar
     private static String ruta_archivos;            // Ruta donde se almacenarán los archivos recibidos
     private static ServerSocket serverSocket;       // Socket del servidor para aceptar conexiones
     private static DefaultMutableTreeNode rootNode; // Nodo raíz para el árbol de archivos
@@ -25,21 +26,38 @@ public class servidor {
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(600, 500);
         frame.setLayout(new BorderLayout());
+        
+        // Panel superior para configuración del servidor
+        JPanel clientPanel = new JPanel(new FlowLayout());
+        JLabel clientLabel = new JLabel("Servidor:");
+        JTextField clientField = new JTextField("127.0.0.1", 15); // Campo para la IP del cliente
+        JLabel portLabel = new JLabel("Puerto:");
+        JTextField portField = new JTextField("8000", 5); // Campo para el puerto diferente al del servidor
+        clientPanel.add(clientLabel);
+        clientPanel.add(clientField);
+        clientPanel.add(portLabel);
+        clientPanel.add(portField);
 
         // Panel superior con botones de acción
         JPanel topPanel = new JPanel(new BorderLayout());
+        JPanel infoPanel = new JPanel(new BorderLayout());
         JButton selectButton = new JButton("Seleccionar Carpeta de Destino");
+        JButton sendButton = new JButton("Enviar Archivo Seleccionado");
         JButton refreshButton = new JButton("Actualizar");
         JButton createButton = new JButton("Crear Archivo/Carpeta");
         JButton deleteButton = new JButton("Eliminar Seleccionado");
         JButton renameButton = new JButton("Renombrar Seleccionado");
         JPanel buttonPanel = new JPanel(new FlowLayout());
         buttonPanel.add(selectButton);
+        buttonPanel.add(sendButton);
         buttonPanel.add(createButton);
         buttonPanel.add(deleteButton);
         buttonPanel.add(renameButton);
         buttonPanel.add(refreshButton);
         topPanel.add(buttonPanel, BorderLayout.NORTH);
+        
+        JLabel fileInfoLabel = new JLabel("Archivo seleccionado: Ninguno");
+        infoPanel.add(fileInfoLabel, BorderLayout.SOUTH);
 
         // Panel central con división horizontal (árbol de archivos y área de estado)
         JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
@@ -70,15 +88,17 @@ public class servidor {
                 return;
             }
 
-            // Muestra información del archivo/directorio seleccionado
+            // Actualiza la información del archivo seleccionado
             Object nodeInfo = node.getUserObject();
             if (nodeInfo instanceof File) {
                 File file = (File) nodeInfo;
-                if (file.isDirectory()) {
-                    statusArea.append("Directorio seleccionado: " + file.getAbsolutePath() + "\n");
+                if (!file.isDirectory()) {
+                    selectedFile = file;
+                    fileInfoLabel.setText("Archivo seleccionado: " + file.getName()
+                            + " (" + file.length() + " bytes)");
                 } else {
-                    statusArea.append("Archivo seleccionado: " + file.getName()
-                            + " (" + file.length() + " bytes)\n");
+                    selectedFile = null;
+                    fileInfoLabel.setText("Directorio seleccionado: " + file.getName());
                 }
             }
         });
@@ -254,6 +274,84 @@ public class servidor {
                         "No se pudo renombrar. ¿El nuevo nombre ya existe?",
                         "Error", JOptionPane.ERROR_MESSAGE);
             }
+        });
+        
+        // Listener para el botón de enviar archivo
+        sendButton.addActionListener(e -> {
+            if (selectedFile == null) {
+                JOptionPane.showMessageDialog(frame,
+                        "Por favor seleccione un archivo primero",
+                        "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            // Envía el archivo en un hilo separado para no bloquear la interfaz
+            new Thread(() -> {
+                try {
+                    String dir = clientField.getText(); // Obtiene dirección del cliente
+                    int pto = Integer.parseInt(portField.getText()); // Obtiene puerto
+
+                    // Muestra estado de conexión
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("Conectando al cliente " + dir + ":" + pto + "...\n");
+                    });
+
+                    Socket cl = new Socket(dir, pto); // Establece conexión
+
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("Conexión establecida. Enviando archivo...\n");
+                    });
+
+                    // Prepara información del archivo
+                    String nombre = selectedFile.getName();
+                    String path = selectedFile.getAbsolutePath();
+                    long tam = selectedFile.length();
+
+                    // Flujos para enviar datos
+                    DataOutputStream dos = new DataOutputStream(cl.getOutputStream());
+                    DataInputStream dis = new DataInputStream(new FileInputStream(path));
+
+                    // Envía metadatos (nombre y tamaño)
+                    dos.writeUTF(nombre);
+                    dos.flush();
+                    dos.writeLong(tam);
+                    dos.flush();
+
+                    long enviados = 0;
+                    int l = 0;
+
+                    // Envía el archivo en bloques
+                    while (enviados < tam) {
+                        byte[] b = new byte[5500];
+                        l = dis.read(b);
+                        if (l == -1) break; // fin de archivo
+                        dos.write(b, 0, l);
+                        dos.flush();
+                        enviados += l;
+                        final int porcentaje = (int) ((enviados * 100) / tam);
+
+                        // Actualiza progreso
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("\rProgreso: " + porcentaje + "%");
+                        });
+                    }
+
+                    // Finalización del envío
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("\nArchivo enviado con éxito!\n");
+                        updateFileTree(); // Actualiza el árbol (por si hubo cambios)
+                    });
+
+                    dis.close();
+                    dos.close();
+                    cl.close();
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("Error al enviar archivo: " + ex.getMessage() + "\n");
+                    });
+                    ex.printStackTrace();
+                }
+            }).start();
         });
 
         frame.setVisible(true); // Muestra la ventana
