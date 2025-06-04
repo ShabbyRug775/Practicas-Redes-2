@@ -24,62 +24,65 @@ public class servidor {
         // Configuración de la ventana principal
         JFrame frame = new JFrame("Servidor de Archivos");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(600, 500);
+        frame.setSize(700, 600);
         frame.setLayout(new BorderLayout());
         
         // Panel superior para configuración del servidor
         JPanel clientPanel = new JPanel(new FlowLayout());
         JLabel clientLabel = new JLabel("Servidor:");
-        JTextField clientField = new JTextField("127.0.0.1", 15); // Campo para la IP del cliente
+        JTextField clientField = new JTextField("127.0.0.1", 15);   // Campo para la IP del cliente
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8001", 5); // Campo para el puerto diferente al del servidor
+        JTextField portField = new JTextField("8000", 5);           // Campo para el puerto diferente al del servidor
         clientPanel.add(clientLabel);
         clientPanel.add(clientField);
         clientPanel.add(portLabel);
         clientPanel.add(portField);
-
-        // Panel superior con botones de acción
-        JPanel topPanel = new JPanel(new BorderLayout());
-        JPanel infoPanel = new JPanel(new BorderLayout());
-        JButton selectButton = new JButton("Seleccionar Carpeta de Destino");
-        JButton sendButton = new JButton("Enviar Archivo Seleccionado");
-        JButton refreshButton = new JButton("Actualizar");
-        JButton createButton = new JButton("Crear Archivo/Carpeta");
-        JButton deleteButton = new JButton("Eliminar Seleccionado");
-        JButton renameButton = new JButton("Renombrar Seleccionado");
-        JPanel buttonPanel = new JPanel(new FlowLayout());
-        buttonPanel.add(selectButton);
-        buttonPanel.add(sendButton);
-        buttonPanel.add(createButton);
-        buttonPanel.add(deleteButton);
-        buttonPanel.add(renameButton);
-        buttonPanel.add(refreshButton);
-        topPanel.add(buttonPanel, BorderLayout.NORTH);
         
-        JLabel fileInfoLabel = new JLabel("Archivo seleccionado: Ninguno");
-        infoPanel.add(fileInfoLabel, BorderLayout.SOUTH);
+        JSplitPane mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+        JSplitPane fileSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
 
-        // Panel central con división horizontal (árbol de archivos y área de estado)
-        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-
-        // Configuración del árbol de archivos
         rootNode = new DefaultMutableTreeNode("Sistema de Archivos");
         treeModel = new DefaultTreeModel(rootNode);
         fileTree = new JTree(treeModel);
         fileTree.setEditable(false);
         JScrollPane treeScroll = new JScrollPane(fileTree);
 
+        // Panel superior con botones de acción
+        JPanel infoPanel = new JPanel(new BorderLayout());
+        JButton sendButton = new JButton("Enviar Archivo Seleccionado");
+        JButton refreshButton = new JButton("Actualizar");
+        JButton createButton = new JButton("Crear Archivo/Carpeta");
+        JButton deleteButton = new JButton("Eliminar Seleccionado");
+        JButton renameButton = new JButton("Renombrar Seleccionado");
+        JPanel buttonPanel = new JPanel(new GridLayout(5, 1));
+        buttonPanel.add(sendButton);
+        buttonPanel.add(refreshButton);
+        buttonPanel.add(createButton);
+        buttonPanel.add(deleteButton);
+        buttonPanel.add(renameButton);
+        
+        JLabel fileInfoLabel = new JLabel("Archivo seleccionado: Ninguno");
+        infoPanel.add(fileInfoLabel, BorderLayout.NORTH);
+        infoPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        fileSplitPane.setLeftComponent(treeScroll);
+        fileSplitPane.setRightComponent(infoPanel);
+        fileSplitPane.setDividerLocation(400);
+        
         // Configuración del área de estado
         statusArea = new JTextArea();
         statusArea.setEditable(false);
         JScrollPane statusScroll = new JScrollPane(statusArea);
-
-        splitPane.setLeftComponent(treeScroll);
-        splitPane.setRightComponent(statusScroll);
-        splitPane.setDividerLocation(250);
-
-        frame.add(topPanel, BorderLayout.NORTH);
-        frame.add(splitPane, BorderLayout.CENTER);
+        
+        mainSplitPane.setTopComponent(fileSplitPane);
+        mainSplitPane.setBottomComponent(statusScroll);
+        mainSplitPane.setDividerLocation(350);
+        
+        JButton loadFsButton = new JButton("Cargar Sistema de Archivos");
+        clientPanel.add(loadFsButton);
+        
+        frame.add(clientPanel, BorderLayout.NORTH);
+        frame.add(mainSplitPane, BorderLayout.CENTER);
 
         // Listener para selección de elementos en el árbol
         fileTree.addTreeSelectionListener(e -> {
@@ -104,7 +107,7 @@ public class servidor {
         });
 
         // Listener para el botón de selección de carpeta
-        selectButton.addActionListener(e -> {
+        loadFsButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
             fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
             int returnValue = fileChooser.showOpenDialog(null);

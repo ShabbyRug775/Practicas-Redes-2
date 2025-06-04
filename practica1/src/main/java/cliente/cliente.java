@@ -10,26 +10,29 @@ import javax.swing.event.*;
 
 public class cliente {
 
-    private static JTextArea statusArea;
-    private static File selectedFile;
-    private static DefaultMutableTreeNode rootNode;
-    private static JTree fileTree;
-    private static DefaultTreeModel treeModel;
-    private static String currentRootPath;
-    private static ServerSocket receptionSocket;
+    // Componentes de la interfaz gráfica y variables de estado
+    private static JTextArea statusArea;                    // Área de texto para mostrar el estado del servidor
+    private static File selectedFile;                       // Archivo seleccionado para enviar
+    private static DefaultMutableTreeNode rootNode;         // Nodo raíz para el árbol de archivos
+    private static JTree fileTree;                          // Componente JTree para mostrar la estructura de archivos
+    private static DefaultTreeModel treeModel;              // Nodo raíz para el árbol de archivos
+    private static String currentRootPath;                  // Ruta donde se almacenarán los archivos recibidos
+    private static ServerSocket receptionSocket;            // Socket del servidor para aceptar conexiones
     private static final int RECEPTION_PORT = 8001;
 
     public static void main(String[] args) {
+        // Configuración de la ventana principal
         JFrame frame = new JFrame("Cliente de Archivos");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(700, 600);
         frame.setLayout(new BorderLayout());
 
+        // Panel superior para configuración del servidor
         JPanel serverPanel = new JPanel(new FlowLayout());
         JLabel serverLabel = new JLabel("Servidor:");
-        JTextField serverField = new JTextField("127.0.0.1", 15);
+        JTextField serverField = new JTextField("127.0.0.1", 15);   // Campo para la IP del cliente
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5);
+        JTextField portField = new JTextField("8001", 5);           // Campo para el puerto diferente al del servidor
         serverPanel.add(serverLabel);
         serverPanel.add(serverField);
         serverPanel.add(portLabel);
@@ -44,6 +47,7 @@ public class cliente {
         fileTree.setEditable(false);
         JScrollPane treeScroll = new JScrollPane(fileTree);
 
+        // Panel de botones de acción
         JPanel infoPanel = new JPanel(new BorderLayout());
         JButton sendButton = new JButton("Enviar Archivo Seleccionado");
         JButton refreshButton = new JButton("Actualizar");
@@ -65,6 +69,7 @@ public class cliente {
         fileSplitPane.setRightComponent(infoPanel);
         fileSplitPane.setDividerLocation(400);
 
+        // Configuración del área de estado
         statusArea = new JTextArea();
         statusArea.setEditable(false);
         JScrollPane statusScroll = new JScrollPane(statusArea);
@@ -196,6 +201,7 @@ public class cliente {
             }
         });
 
+        // Listener para el botón de renombrar
         renameButton.addActionListener(e -> {
             DefaultMutableTreeNode selectedNode = (DefaultMutableTreeNode) fileTree.getLastSelectedPathComponent();
             if (selectedNode == null || selectedNode == rootNode) {
