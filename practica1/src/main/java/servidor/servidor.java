@@ -29,10 +29,10 @@ public class servidor {
         
         // Panel superior para configuración del servidor
         JPanel clientPanel = new JPanel(new FlowLayout());
-        JLabel clientLabel = new JLabel("Servidor:");
+        JLabel clientLabel = new JLabel("Cliente:");
         JTextField clientField = new JTextField("127.0.0.1", 15);   // Campo para la IP del cliente
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5);           // Campo para el puerto diferente al del servidor
+        JTextField portField = new JTextField("8001", 5);           // Campo para el puerto diferente al del servidor
         clientPanel.add(clientLabel);
         clientPanel.add(clientField);
         clientPanel.add(portLabel);

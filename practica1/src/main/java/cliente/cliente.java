@@ -18,7 +18,7 @@ public class cliente {
     private static DefaultTreeModel treeModel;              // Nodo raíz para el árbol de archivos
     private static String currentRootPath;                  // Ruta donde se almacenarán los archivos recibidos
     private static ServerSocket receptionSocket;            // Socket del servidor para aceptar conexiones
-    private static final int RECEPTION_PORT = 8001;
+    private static final int RECEPTION_PORT = 8001;         // Puerto de recepcion
 
     public static void main(String[] args) {
         // Configuración de la ventana principal
@@ -30,9 +30,9 @@ public class cliente {
         // Panel superior para configuración del servidor
         JPanel serverPanel = new JPanel(new FlowLayout());
         JLabel serverLabel = new JLabel("Servidor:");
-        JTextField serverField = new JTextField("127.0.0.1", 15);   // Campo para la IP del cliente
+        JTextField serverField = new JTextField("127.0.0.1", 15);   // Campo para la IP del servidor
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8001", 5);           // Campo para el puerto diferente al del servidor
+        JTextField portField = new JTextField("8000", 5);           // Campo para el puerto de conexion
         serverPanel.add(serverLabel);
         serverPanel.add(serverField);
         serverPanel.add(portLabel);
@@ -233,8 +233,8 @@ public class cliente {
 
             new Thread(() -> {
                 try {
-                    String dir = serverField.getText();
-                    int pto = Integer.parseInt(portField.getText());
+                    String dir = serverField.getText();                 // IP del puerto
+                    int pto = Integer.parseInt(portField.getText());    // IP del servidor
 
                     if (pto == RECEPTION_PORT) {
                         SwingUtilities.invokeLater(() -> {
