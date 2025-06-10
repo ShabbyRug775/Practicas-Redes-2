@@ -1,36 +1,40 @@
 package cliente;
 
 import java.net.*;
+import java.util.HashMap;
+import java.util.Map;
 import java.io.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import javax.swing.tree.*;
-import java.util.*;
-import javax.swing.filechooser.*;
+import javax.swing.event.*;
 
 public class cliente {
 
-    private static JTextArea statusArea;
-    private static File selectedFile;
-    private static DefaultMutableTreeNode rootNode;
-    private static JTree fileTree;
-    private static DefaultTreeModel treeModel;
-    private static String currentRootPath;
-    private static final int PACKET_SIZE = 65000;
-    private static final int WINDOW_SIZE = 5;
+    // Componentes de la interfaz gráfica y variables de estado
+    private static JTextArea statusArea;                    // Área de texto para mostrar el estado del servidor
+    private static File selectedFile;                       // Archivo seleccionado para enviar
+    private static DefaultMutableTreeNode rootNode;         // Nodo raíz para el árbol de archivos
+    private static JTree fileTree;                          // Componente JTree para mostrar la estructura de archivos
+    private static DefaultTreeModel treeModel;              // Nodo raíz para el árbol de archivos
+    private static String currentRootPath;                  // Ruta donde se almacenarán los archivos recibidos
+    //private static ServerSocket receptionSocket;            // Socket del servidor para aceptar conexiones
+    private static final int RECEPTION_PORT = 8001;         // Puerto de recepcion
 
     public static void main(String[] args) {
-        JFrame frame = new JFrame("Cliente de Archivos UDP (Go-Back-N)");
+        // Configuración de la ventana principal
+        JFrame frame = new JFrame("Cliente de Archivos");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(700, 600);
         frame.setLayout(new BorderLayout());
 
+        // Panel superior para configuración del servidor
         JPanel serverPanel = new JPanel(new FlowLayout());
         JLabel serverLabel = new JLabel("Servidor:");
-        JTextField serverField = new JTextField("127.0.0.1", 15);
+        JTextField serverField = new JTextField("127.0.0.1", 15);   // Campo para la IP del servidor
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5);
+        JTextField portField = new JTextField("8000", 5);           // Campo para el puerto de conexion
         serverPanel.add(serverLabel);
         serverPanel.add(serverField);
         serverPanel.add(portLabel);
@@ -45,6 +49,7 @@ public class cliente {
         fileTree.setEditable(false);
         JScrollPane treeScroll = new JScrollPane(fileTree);
 
+        // Panel de botones de acción
         JPanel infoPanel = new JPanel(new BorderLayout());
         JButton sendButton = new JButton("Enviar Archivo Seleccionado");
         JButton refreshButton = new JButton("Actualizar");
@@ -66,6 +71,7 @@ public class cliente {
         fileSplitPane.setRightComponent(infoPanel);
         fileSplitPane.setDividerLocation(400);
 
+        // Configuración del área de estado
         statusArea = new JTextArea();
         statusArea.setEditable(false);
         JScrollPane statusScroll = new JScrollPane(statusArea);
@@ -73,6 +79,9 @@ public class cliente {
         mainSplitPane.setTopComponent(fileSplitPane);
         mainSplitPane.setBottomComponent(statusScroll);
         mainSplitPane.setDividerLocation(350);
+
+        JButton loadFsButton = new JButton("Cargar Sistema de Archivos");
+        serverPanel.add(loadFsButton);
 
         frame.add(serverPanel, BorderLayout.NORTH);
         frame.add(mainSplitPane, BorderLayout.CENTER);
@@ -94,9 +103,6 @@ public class cliente {
             }
         });
 
-        JButton loadFsButton = new JButton("Cargar Sistema de Archivos");
-        serverPanel.add(loadFsButton);
-
         loadFsButton.addActionListener(e -> {
             JFileChooser fileChooser = new JFileChooser();
             fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
@@ -117,21 +123,13 @@ public class cliente {
 
         createButton.addActionListener(e -> {
             if (currentRootPath == null) {
-                JOptionPane.showMessageDialog(frame,
-                        "Por favor seleccione un directorio raíz primero",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "Por favor seleccione un directorio raíz primero", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             String[] options = {"Archivo", "Carpeta", "Cancelar"};
-            int choice = JOptionPane.showOptionDialog(frame,
-                    "¿Qué desea crear?",
-                    "Crear nuevo",
-                    JOptionPane.DEFAULT_OPTION,
-                    JOptionPane.QUESTION_MESSAGE,
-                    null,
-                    options,
-                    options[0]);
+            int choice = JOptionPane.showOptionDialog(frame, "¿Qué desea crear?", "Crear nuevo",
+                    JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
 
             if (choice == 2 || choice == JOptionPane.CLOSED_OPTION) return;
 
@@ -156,50 +154,37 @@ public class cliente {
                     if (newFile.createNewFile()) {
                         statusArea.append("Archivo creado: " + newFile.getAbsolutePath() + "\n");
                     } else {
-                        JOptionPane.showMessageDialog(frame,
-                                "No se pudo crear el archivo. ¿Ya existe?",
-                                "Error", JOptionPane.ERROR_MESSAGE);
+                        JOptionPane.showMessageDialog(frame, "No se pudo crear el archivo. ¿Ya existe?", "Error", JOptionPane.ERROR_MESSAGE);
                         return;
                     }
                 } else {
                     if (newFile.mkdir()) {
                         statusArea.append("Carpeta creada: " + newFile.getAbsolutePath() + "\n");
                     } else {
-                        JOptionPane.showMessageDialog(frame,
-                                "No se pudo crear la carpeta. ¿Ya existe?",
-                                "Error", JOptionPane.ERROR_MESSAGE);
+                        JOptionPane.showMessageDialog(frame, "No se pudo crear la carpeta. ¿Ya existe?", "Error", JOptionPane.ERROR_MESSAGE);
                         return;
                     }
                 }
                 updateFileTree();
             } catch (IOException ex) {
-                JOptionPane.showMessageDialog(frame,
-                        "Error al crear: " + ex.getMessage(),
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "Error al crear: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
             }
         });
 
         deleteButton.addActionListener(e -> {
             DefaultMutableTreeNode selectedNode = (DefaultMutableTreeNode) fileTree.getLastSelectedPathComponent();
             if (selectedNode == null || selectedNode == rootNode) {
-                JOptionPane.showMessageDialog(frame,
-                        "Por favor seleccione un archivo o carpeta para eliminar",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "Por favor seleccione un archivo o carpeta para eliminar", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             File fileToDelete = (File) selectedNode.getUserObject();
             if (fileToDelete.getAbsolutePath().equals(currentRootPath)) {
-                JOptionPane.showMessageDialog(frame,
-                        "No se puede eliminar el directorio raíz actual",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "No se puede eliminar el directorio raíz actual", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
-            int confirm = JOptionPane.showConfirmDialog(frame,
-                    "¿Está seguro que desea eliminar " + fileToDelete.getName() + "?",
-                    "Confirmar eliminación",
-                    JOptionPane.YES_NO_OPTION);
+            int confirm = JOptionPane.showConfirmDialog(frame, "¿Está seguro que desea eliminar " + fileToDelete.getName() + "?", "Confirmar eliminación", JOptionPane.YES_NO_OPTION);
 
             if (confirm == JOptionPane.YES_OPTION) {
                 boolean success;
@@ -213,26 +198,21 @@ public class cliente {
                     statusArea.append("Eliminado: " + fileToDelete.getAbsolutePath() + "\n");
                     updateFileTree();
                 } else {
-                    JOptionPane.showMessageDialog(frame,
-                            "No se pudo eliminar. ¿Está en uso?",
-                            "Error", JOptionPane.ERROR_MESSAGE);
+                    JOptionPane.showMessageDialog(frame, "No se pudo eliminar. ¿Está en uso?", "Error", JOptionPane.ERROR_MESSAGE);
                 }
             }
         });
 
+        // Listener para el botón de renombrar
         renameButton.addActionListener(e -> {
             DefaultMutableTreeNode selectedNode = (DefaultMutableTreeNode) fileTree.getLastSelectedPathComponent();
             if (selectedNode == null || selectedNode == rootNode) {
-                JOptionPane.showMessageDialog(frame,
-                        "Por favor seleccione un archivo o carpeta para renombrar",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "Por favor seleccione un archivo o carpeta para renombrar", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             File fileToRename = (File) selectedNode.getUserObject();
-            String newName = JOptionPane.showInputDialog(frame,
-                    "Nuevo nombre:",
-                    fileToRename.getName());
+            String newName = JOptionPane.showInputDialog(frame, "Nuevo nombre:", fileToRename.getName());
 
             if (newName == null || newName.trim().isEmpty() || newName.equals(fileToRename.getName())) {
                 return;
@@ -243,170 +223,261 @@ public class cliente {
                 statusArea.append("Renombrado: " + fileToRename.getName() + " → " + newName + "\n");
                 updateFileTree();
             } else {
-                JOptionPane.showMessageDialog(frame,
-                        "No se pudo renombrar. ¿El nuevo nombre ya existe?",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "No se pudo renombrar. ¿El nuevo nombre ya existe?", "Error", JOptionPane.ERROR_MESSAGE);
             }
         });
 
         sendButton.addActionListener(e -> {
             if (selectedFile == null) {
-                JOptionPane.showMessageDialog(frame,
-                        "Por favor seleccione un archivo primero",
-                        "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(frame, "Por favor seleccione un archivo primero", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             new Thread(() -> {
                 try {
-                    String dir = serverField.getText();
-                    int pto = Integer.parseInt(portField.getText());
-                    
+                    String dir = serverField.getText();                 // IP del puerto
+                    int pto = Integer.parseInt(portField.getText());    // IP del servidor
+
+                    if (pto == RECEPTION_PORT) {
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("Error: No se puede enviar al puerto de recepción\n");
+                        });
+                        return;
+                    }
+
                     SwingUtilities.invokeLater(() -> {
-                        statusArea.append("Iniciando transferencia Go-Back-N a " + dir + ":" + pto + "...\n");
+                        statusArea.append("Conectando al servidor " + dir + ":" + pto + "...\n");
                     });
 
-                    DatagramSocket clientSocket = new DatagramSocket();
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("Conexión establecida. Enviando archivo...\n");
+                    });
+
+                    DatagramSocket socket = new DatagramSocket();
                     InetAddress serverAddress = InetAddress.getByName(dir);
                     
-                    String nombre = selectedFile.getName();
-                    long tam = selectedFile.length();
-                    
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    DataOutputStream dos = new DataOutputStream(baos);
-                    dos.writeUTF(nombre);
-                    dos.writeLong(tam);
-                    byte[] metadata = baos.toByteArray();
-                    
+                    // Enviar metadatos primero (nombre y tamaño)
+                    String metadata = selectedFile.getName() + "|" + selectedFile.length();
+                    byte[] metadataBytes = metadata.getBytes();
                     DatagramPacket metadataPacket = new DatagramPacket(
-                        metadata, metadata.length, serverAddress, pto);
-                    clientSocket.send(metadataPacket);
+                        metadataBytes, metadataBytes.length, serverAddress, pto);
+                    socket.send(metadataPacket);
                     
-                    int base = 0;
-                    int nextSeqNum = 0;
-                    
-                    final boolean[] transferComplete = new boolean[]{false};
-                    final Map<Integer, byte[]> packetBuffer = new HashMap<>();
-                    
-                    final int bas = base;
-                    final int nsn = nextSeqNum;
-                    
-                    java.util.Timer retransmitTimer = new java.util.Timer(true);
-                    retransmitTimer.scheduleAtFixedRate(new TimerTask() {
-                        @Override
-                        public void run() {
-                            synchronized (packetBuffer) {
-                                if (!transferComplete[0] && !packetBuffer.isEmpty()) {
-                                    SwingUtilities.invokeLater(() -> {
-                                        statusArea.append("Timeout - Retransmitiendo ventana desde: " + bas + "\n");
-                                    });
-                                    
-                                    try {
-                                        for (int i = bas; i < bas + WINDOW_SIZE && i < nsn; i++) {
-                                            byte[] data = packetBuffer.get(i);
-                                            if (data != null) {
-                                                DatagramPacket packet = new DatagramPacket(
-                                                    data, data.length, serverAddress, pto);
-                                                clientSocket.send(packet);
-                                            }
-                                        }
-                                    } catch (IOException ex) {
-                                        ex.printStackTrace();
-                                    }
-                                }
-                            }
-                        }
-                    }, 1000, 1000);
-                    
-                    FileInputStream fis = new FileInputStream(selectedFile);
-                    long startTime = System.currentTimeMillis();
-                    
-                    while (!transferComplete[0]) {
-                        while (nextSeqNum < base + WINDOW_SIZE && nextSeqNum * PACKET_SIZE < tam) {
-                            long offset = nextSeqNum * (long)PACKET_SIZE;
-                            int bytesToRead = (int)Math.min(PACKET_SIZE, tam - offset);
-                            byte[] fileData = new byte[bytesToRead];
-                            fis.read(fileData);
-                            
-                            ByteArrayOutputStream packetBaos = new ByteArrayOutputStream();
-                            DataOutputStream packetDos = new DataOutputStream(packetBaos);
-                            packetDos.writeInt(nextSeqNum);
-                            packetDos.writeInt(bytesToRead);
-                            packetDos.write(fileData);
-                            
-                            byte[] packetData = packetBaos.toByteArray();
-                            
-                            synchronized (packetBuffer) {
-                                packetBuffer.put(nextSeqNum, packetData);
-                            }
-                            
-                            DatagramPacket packet = new DatagramPacket(
-                                packetData, packetData.length, serverAddress, pto);
-                            clientSocket.send(packet);
-                            
-                            SwingUtilities.invokeLater(() -> {
-                                statusArea.append("Enviado paquete: " + nsn + "\n");
-                            });
-                            
-                            nextSeqNum++;
-                        }
+                    // Esperar confirmación de metadatos recibidos
+                    byte[] ackBuffer = new byte[256];
+                    DatagramPacket ackPacket = new DatagramPacket(ackBuffer, ackBuffer.length);
+                    socket.receive(ackPacket);
+                    String ack = new String(ackPacket.getData(), 0, ackPacket.getLength());
+                    if (!"ACK_METADATA".equals(ack.trim())) {
+                        throw new IOException("Error en confirmación de metadatos");
+                    }
+
+                    // Manejar archivo vacío
+                    if (selectedFile.length() == 0) {
+                        // Enviar señal de END directamente para archivos vacíos
+                        byte[] endSignal = "END".getBytes();
+                        DatagramPacket endPacket = new DatagramPacket(
+                            endSignal, endSignal.length, serverAddress, pto);
+                        socket.send(endPacket);
                         
-                        clientSocket.setSoTimeout(500);
-                        try {
-                            byte[] ackData = new byte[4];
-                            DatagramPacket ackPacket = new DatagramPacket(ackData, ackData.length);
-                            clientSocket.receive(ackPacket);
-                            
-                            DataInputStream ackDis = new DataInputStream(
-                                new ByteArrayInputStream(ackPacket.getData()));
-                            int ackedSeq = ackDis.readInt();
-                            
-                            if (ackedSeq >= base) {
-                                synchronized (packetBuffer) {
-                                    for (int i = base; i <= ackedSeq; i++) {
-                                        packetBuffer.remove(i);
-                                    }
-                                    base = ackedSeq + 1;
-                                }
-                                
-                                SwingUtilities.invokeLater(() -> {
-                                    statusArea.append("ACK recibido: " + ackedSeq + "\n");
-                                });
-                            }
-                            
-                            if (base * PACKET_SIZE >= tam) {
-                                transferComplete[0] = true;
-                                long endTime = System.currentTimeMillis();
-                                double speed = (tam / 1024.0) / ((endTime - startTime) / 1000.0);
-                                
-                                SwingUtilities.invokeLater(() -> {
-                                    statusArea.append("\nTransferencia completada!\n");
-                                    statusArea.append(String.format("Velocidad promedio: %.2f KB/s\n", speed));
-                                });
-                            }
-                        } catch (SocketTimeoutException ste) {
-                            // Timeout manejado por el temporizador
-                        }
-                        
-                        final int progress = (int)((base * PACKET_SIZE * 100) / tam);
                         SwingUtilities.invokeLater(() -> {
-                            statusArea.append("\rProgreso: " + progress + "%");
+                            statusArea.append("Archivo vacío enviado con éxito!\n");
                         });
+                        socket.close();
+                        return;
                     }
                     
-                    retransmitTimer.cancel();
-                    fis.close();
-                    clientSocket.close();
+                    // Enviar archivo en paquetes
+                    try(FileInputStream fis = new FileInputStream(selectedFile)){
+                        byte[] buffer = new byte[1024]; // Tamaño más pequeño para UDP
+                        int read;
+                        long totalSent = 0;
+                        int sequenceNumber = 0;
+
+                        while ((read = fis.read(buffer)) != -1) {
+                            // Crear paquete con número de secuencia y datos
+                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                            DataOutputStream dos = new DataOutputStream(baos);
+                            dos.writeInt(sequenceNumber++);
+                            dos.write(buffer, 0, read);
+                            byte[] packetData = baos.toByteArray();
+
+                            DatagramPacket packet = new DatagramPacket(
+                                packetData, packetData.length, serverAddress, pto);
+                            socket.send(packet);
+
+                            // Esperar ACK para este paquete
+                            socket.receive(ackPacket);
+                            ack = new String(ackPacket.getData(), 0, ackPacket.getLength());
+                            if (!("ACK_" + (sequenceNumber-1)).equals(ack.trim())) {
+                                // Reintentar en caso de fallo
+                                sequenceNumber--;
+                                continue;
+                            }
+
+                            totalSent += read;
+                            final int progress = (int) ((totalSent * 100) / selectedFile.length());
+                            SwingUtilities.invokeLater(() -> {
+                                statusArea.append("\rProgreso: " + progress + "%");
+                            });
+                        }
+
+                        // Enviar paquete de fin de transmisión
+                        byte[] endSignal = "END".getBytes();
+                        DatagramPacket endPacket = new DatagramPacket(
+                            endSignal, endSignal.length, serverAddress, pto);
+                        socket.send(endPacket);
+
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("\nArchivo enviado con éxito!\n");
+                        });
+
+                        fis.close();
+                        socket.close();
+                    } catch (Exception ex){
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("Error al enviar archivo: " + ex.getMessage() + "\n");
+                        });
+                        ex.printStackTrace();
+                    }
+                    
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
-                        statusArea.append("Error en la transferencia: " + ex.getMessage() + "\n");
+                        statusArea.append("Error al enviar archivo: " + ex.getMessage() + "\n");
                     });
                     ex.printStackTrace();
                 }
             }).start();
         });
 
+        // Iniciar recepción de archivos
+        startFileReception();
         frame.setVisible(true);
+    }
+
+    private static void startFileReception() {
+        new Thread(() -> {
+            try {
+                DatagramSocket receptionSocket = new DatagramSocket(RECEPTION_PORT);
+                statusArea.append("Cliente listo para recibir archivos UDP en puerto " + RECEPTION_PORT + "\n");
+
+                while (true) {
+                    // Buffer para recibir los datos
+                    byte[] receiveBuffer = new byte[1024];
+                    DatagramPacket packet = new DatagramPacket(receiveBuffer, receiveBuffer.length);
+
+                    // 1. Recibir metadatos (nombre y tamaño)
+                    receptionSocket.receive(packet);
+                    String metadata = new String(packet.getData(), 0, packet.getLength());
+
+                    // Validar metadatos
+                    if (!metadata.contains("|")) {
+                        statusArea.append("Error: Metadatos inválidos\n");
+                        continue;
+                    }
+
+                    String[] parts = metadata.split("\\|");
+                    String nombre = parts[0];
+                    long tam = Long.parseLong(parts[1]);
+
+                    // Limpieza del nombre de archivo
+                    nombre = nombre.replace("..", "").replace("/", "").replace("\\", "");
+
+                    // Enviar ACK de metadatos
+                    byte[] ackData = "ACK_METADATA".getBytes();
+                    DatagramPacket ackPacket = new DatagramPacket(
+                        ackData, ackData.length, packet.getAddress(), packet.getPort());
+                    receptionSocket.send(ackPacket);
+
+                    // Preparar archivo de destino
+                    File receivedFile = new File(currentRootPath, nombre);
+                    
+                    final String finalNombre = nombre;
+
+                    // Manejo de archivo vacío
+                    if (tam == 0) {
+                        new File(currentRootPath + nombre).createNewFile();
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("Archivo vacío recibido: " + finalNombre + "\n");
+                            updateFileTree();
+                        });
+                        continue;
+                    }
+                    
+                    // Crear flujo de salida para guardar el archivo
+                    try(FileOutputStream fos = new FileOutputStream(receivedFile)){
+                        // Recibir paquetes de datos
+                        long recibidos = 0;
+                        int expectedSeq = 0;
+                        Map<Integer, byte[]> outOfOrderPackets = new HashMap<>();
+
+                        while (recibidos < tam) {
+                            receptionSocket.receive(packet);
+
+                            // Verificar si es el paquete final
+                            String dataStr = new String(packet.getData(), 0, packet.getLength());
+                            if ("END".equals(dataStr.trim())) {
+                                break;
+                            }
+
+                            // Procesar paquete normal
+                            ByteArrayInputStream bais = new ByteArrayInputStream(
+                                packet.getData(), 0, packet.getLength());
+                            DataInputStream dis = new DataInputStream(bais);
+                            int seqNumber = dis.readInt();
+                            byte[] fileData = new byte[packet.getLength() - 4];
+                            dis.readFully(fileData);
+
+                            // Manejar paquetes en orden
+                            if (seqNumber == expectedSeq) {
+                                fos.write(fileData);
+                                recibidos += fileData.length;
+                                expectedSeq++;
+
+                                // Procesar paquetes fuera de orden que estaban en buffer
+                                while (outOfOrderPackets.containsKey(expectedSeq)) {
+                                    fos.write(outOfOrderPackets.remove(expectedSeq));
+                                    recibidos += outOfOrderPackets.get(expectedSeq).length;
+                                    expectedSeq++;
+                                }
+                            } 
+                            // Almacenar paquetes fuera de orden
+                            else if (seqNumber > expectedSeq) {
+                                outOfOrderPackets.put(seqNumber, fileData);
+                            }
+
+                            // Enviar ACK (incluso para paquetes fuera de orden)
+                            ackData = ("ACK_" + seqNumber).getBytes();
+                            ackPacket = new DatagramPacket(
+                                ackData, ackData.length, packet.getAddress(), packet.getPort());
+                            receptionSocket.send(ackPacket);
+
+                            // Actualizar progreso
+                            final int porcentaje = (int) ((recibidos * 100) / tam);
+                            SwingUtilities.invokeLater(() -> {
+                                statusArea.append("\rRecibiendo: " + porcentaje + "%");
+                            });
+                        }
+
+                        fos.close();
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("\nArchivo recibido: " + finalNombre + "\n");
+                            updateFileTree();
+                        });
+                    } catch (Exception e){
+                        SwingUtilities.invokeLater(() -> {
+                            statusArea.append("Error en recepción UDP: " + e.getMessage() + "\n");
+                        });
+                        e.printStackTrace();
+                    }
+                }
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    statusArea.append("Error en recepción UDP: " + e.getMessage() + "\n");
+                });
+                e.printStackTrace();
+            }
+        }).start();
     }
 
     private static boolean deleteDirectory(File directory) {
