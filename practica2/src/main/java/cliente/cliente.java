@@ -7,10 +7,17 @@ import java.io.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.util.List;
+import java.util.ArrayList;
 import javax.swing.tree.*;
 import javax.swing.event.*;
 
 public class cliente {
+    
+    // Componentes y variables existentes...
+    private static final int WINDOW_SIZE = 4; // Tamaño de ventana para Go-Back-N
+    private static final int FRAG_SIZE = 1024; // Tamaño de fragmento
+    private static final int TIMEOUT_MS = 1000; // Timeout para retransmisiones
 
     // Componentes de la interfaz gráfica y variables de estado
     private static JTextArea statusArea;                    // Área de texto para mostrar el estado del servidor
@@ -235,8 +242,8 @@ public class cliente {
 
             new Thread(() -> {
                 try {
-                    String dir = serverField.getText();                 // IP del puerto
-                    int pto = Integer.parseInt(portField.getText());    // IP del servidor
+                    String dir = serverField.getText();
+                    int pto = Integer.parseInt(portField.getText());
 
                     if (pto == RECEPTION_PORT) {
                         SwingUtilities.invokeLater(() -> {
@@ -249,98 +256,120 @@ public class cliente {
                         statusArea.append("Conectando al servidor " + dir + ":" + pto + "...\n");
                     });
 
-                    SwingUtilities.invokeLater(() -> {
-                        statusArea.append("Conexión establecida. Enviando archivo...\n");
-                    });
-
                     DatagramSocket socket = new DatagramSocket();
+                    socket.setSoTimeout(TIMEOUT_MS);
                     InetAddress serverAddress = InetAddress.getByName(dir);
-                    
-                    // Enviar metadatos primero (nombre y tamaño)
-                    String metadata = selectedFile.getName() + "|" + selectedFile.length();
-                    byte[] metadataBytes = metadata.getBytes();
-                    DatagramPacket metadataPacket = new DatagramPacket(
-                        metadataBytes, metadataBytes.length, serverAddress, pto);
-                    socket.send(metadataPacket);
-                    
-                    // Esperar confirmación de metadatos recibidos
-                    byte[] ackBuffer = new byte[256];
-                    DatagramPacket ackPacket = new DatagramPacket(ackBuffer, ackBuffer.length);
-                    socket.receive(ackPacket);
-                    String ack = new String(ackPacket.getData(), 0, ackPacket.getLength());
-                    if (!"ACK_METADATA".equals(ack.trim())) {
-                        throw new IOException("Error en confirmación de metadatos");
+
+                    // 1. Handshake mejorado con Go-Back-N
+                    long fileSize = selectedFile.length();
+                    int totalPackets = (int) Math.ceil((double) fileSize / FRAG_SIZE);
+
+                    // Modificar el handshake para incluir información de tamaño
+                    String hs = String.join("|",
+                        "HANDSHAKE",
+                        String.valueOf(WINDOW_SIZE),
+                        String.valueOf(FRAG_SIZE),
+                        selectedFile.getName(),
+                        String.valueOf(totalPackets),
+                        String.valueOf(selectedFile.length()) // Añadir tamaño total
+                    );
+
+                    // Verificación adicional (opcional)
+                    if (hs.split("\\|").length != 6) {
+                        throw new IllegalStateException("Handshake mal formado");
                     }
 
-                    // Manejar archivo vacío
-                    if (selectedFile.length() == 0) {
-                        // Enviar señal de END directamente para archivos vacíos
-                        byte[] endSignal = "END".getBytes();
-                        DatagramPacket endPacket = new DatagramPacket(
-                            endSignal, endSignal.length, serverAddress, pto);
-                        socket.send(endPacket);
-                        
+                    DatagramPacket hsPacket = new DatagramPacket(
+                        hs.getBytes(), hs.length(), serverAddress, pto);
+                    socket.send(hsPacket);
+
+                    // Esperar confirmación de handshake
+                    byte[] ackBuf = new byte[2];
+                    DatagramPacket ackPacket = new DatagramPacket(ackBuf, ackBuf.length);
+                    socket.receive(ackPacket);
+
+                    if (!new String(ackPacket.getData(), 0, ackPacket.getLength()).equals("OK")) {
                         SwingUtilities.invokeLater(() -> {
-                            statusArea.append("Archivo vacío enviado con éxito!\n");
+                            statusArea.append("Error en handshake con el servidor\n");
                         });
-                        socket.close();
                         return;
                     }
-                    
-                    // Enviar archivo en paquetes
-                    try(FileInputStream fis = new FileInputStream(selectedFile)){
-                        byte[] buffer = new byte[1024]; // Tamaño más pequeño para UDP
+
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("Conexión establecida. Enviando archivo con Go-Back-N...\n");
+                    });
+
+                    // Preparar todos los paquetes
+                    List<byte[]> packets = new ArrayList<>();
+                    try (FileInputStream fis = new FileInputStream(selectedFile)) {
+                        byte[] buffer = new byte[FRAG_SIZE];
                         int read;
-                        long totalSent = 0;
-                        int sequenceNumber = 0;
+                        int seq = 0;
 
                         while ((read = fis.read(buffer)) != -1) {
-                            // Crear paquete con número de secuencia y datos
-                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                            DataOutputStream dos = new DataOutputStream(baos);
-                            dos.writeInt(sequenceNumber++);
-                            dos.write(buffer, 0, read);
-                            byte[] packetData = baos.toByteArray();
+                            byte[] packetData = new byte[4 + read];
+                            packetData[0] = (byte)(seq >> 8);
+                            packetData[1] = (byte)(seq);
+                            packetData[2] = (byte)(totalPackets >> 8);
+                            packetData[3] = (byte)(totalPackets);
+                            System.arraycopy(buffer, 0, packetData, 4, read);
+                            packets.add(packetData);
+                            seq++;
+                        }
+                    }
 
+                    // Envío con ventana deslizante
+                    int base = 0;
+                    while (base < totalPackets) {
+                        int windowEnd = Math.min(base + WINDOW_SIZE, totalPackets);
+
+                        // Enviar toda la ventana
+                        for (int i = base; i < windowEnd; i++) {
                             DatagramPacket packet = new DatagramPacket(
-                                packetData, packetData.length, serverAddress, pto);
+                                packets.get(i), packets.get(i).length, serverAddress, pto);
                             socket.send(packet);
-
-                            // Esperar ACK para este paquete
-                            socket.receive(ackPacket);
-                            ack = new String(ackPacket.getData(), 0, ackPacket.getLength());
-                            if (!("ACK_" + (sequenceNumber-1)).equals(ack.trim())) {
-                                // Reintentar en caso de fallo
-                                sequenceNumber--;
-                                continue;
-                            }
-
-                            totalSent += read;
-                            final int progress = (int) ((totalSent * 100) / selectedFile.length());
+                            final int j = i;
                             SwingUtilities.invokeLater(() -> {
-                                statusArea.append("\rProgreso: " + progress + "%");
+                                statusArea.append("→ Enviado paquete #" + j + "\n");
                             });
                         }
 
-                        // Enviar paquete de fin de transmisión
-                        byte[] endSignal = "END".getBytes();
-                        DatagramPacket endPacket = new DatagramPacket(
-                            endSignal, endSignal.length, serverAddress, pto);
-                        socket.send(endPacket);
+                        // Esperar ACKs
+                        try {
+                            while (base < windowEnd) {
+                                socket.receive(ackPacket);
+                                int ackNum = ((ackPacket.getData()[0]&0xFF)<<8)|(ackPacket.getData()[1]&0xFF);
+                                SwingUtilities.invokeLater(() -> {
+                                    statusArea.append("✓ ACK recibido: " + ackNum + "\n");
+                                });
 
-                        SwingUtilities.invokeLater(() -> {
-                            statusArea.append("\nArchivo enviado con éxito!\n");
-                        });
-
-                        fis.close();
-                        socket.close();
-                    } catch (Exception ex){
-                        SwingUtilities.invokeLater(() -> {
-                            statusArea.append("Error al enviar archivo: " + ex.getMessage() + "\n");
-                        });
-                        ex.printStackTrace();
+                                if (ackNum >= base) {
+                                    base = ackNum + 1;
+                                    int progress = (int)((base * 100.0) / totalPackets);
+                                    SwingUtilities.invokeLater(() -> {
+                                        statusArea.append("\rProgreso: " + progress + "%");
+                                    });
+                                }
+                            }
+                        } catch (SocketTimeoutException ex) {
+                            final int baseF = base;
+                            SwingUtilities.invokeLater(() -> {
+                                statusArea.append("Timeout. Reenviando desde paquete #" + baseF + "\n");
+                            });
+                        }
                     }
-                    
+
+                    // Enviar señal de fin
+                    byte[] endSignal = "END".getBytes();
+                    DatagramPacket endPacket = new DatagramPacket(
+                        endSignal, endSignal.length, serverAddress, pto);
+                    socket.send(endPacket);
+
+                    SwingUtilities.invokeLater(() -> {
+                        statusArea.append("\nArchivo enviado con éxito!\n");
+                    });
+
+                    socket.close();
                 } catch (Exception ex) {
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("Error al enviar archivo: " + ex.getMessage() + "\n");
@@ -349,6 +378,7 @@ public class cliente {
                 }
             }).start();
         });
+
 
         // Iniciar recepción de archivos
         startFileReception();
@@ -363,108 +393,131 @@ public class cliente {
 
                 while (true) {
                     // Buffer para recibir los datos
-                    byte[] receiveBuffer = new byte[1024];
+                    byte[] receiveBuffer = new byte[65507];
                     DatagramPacket packet = new DatagramPacket(receiveBuffer, receiveBuffer.length);
 
-                    // 1. Recibir metadatos (nombre y tamaño)
+                    // 1. Recibir handshake (mismo formato que el servidor)
                     receptionSocket.receive(packet);
-                    String metadata = new String(packet.getData(), 0, packet.getLength());
+                    String hs = new String(packet.getData(), 0, packet.getLength());
 
-                    // Validar metadatos
-                    if (!metadata.contains("|")) {
-                        statusArea.append("Error: Metadatos inválidos\n");
+                    String[] parts = hs.split("\\|");
+
+                    // Validación completa del handshake igual que en el servidor
+                    if (parts.length < 6 || !parts[0].equals("HANDSHAKE")) {
+                        statusArea.append("Error: Handshake inválido. Formato esperado: HANDSHAKE|window|frag|filename|packets|size\n");
                         continue;
                     }
 
-                    String[] parts = metadata.split("\\|");
-                    String nombre = parts[0];
-                    long tam = Long.parseLong(parts[1]);
+                    try {
+                        int windowSize = Integer.parseInt(parts[1]);
+                        int fragSize = Integer.parseInt(parts[2]);
+                        String fileName = parts[3];
+                        int totalPackets = Integer.parseInt(parts[4]);
+                        long fileSize = Long.parseLong(parts[5]);
 
-                    // Limpieza del nombre de archivo
-                    nombre = nombre.replace("..", "").replace("/", "").replace("\\", "");
+                        // Limpieza del nombre de archivo
+                        fileName = fileName.replace("..", "").replace("/", "").replace("\\", "");
 
-                    // Enviar ACK de metadatos
-                    byte[] ackData = "ACK_METADATA".getBytes();
-                    DatagramPacket ackPacket = new DatagramPacket(
-                        ackData, ackData.length, packet.getAddress(), packet.getPort());
-                    receptionSocket.send(ackPacket);
+                        // Enviar ACK de handshake (igual que el servidor)
+                        byte[] ackData = "OK".getBytes();
+                        DatagramPacket ackPacket = new DatagramPacket(
+                            ackData, ackData.length, packet.getAddress(), packet.getPort());
+                        receptionSocket.send(ackPacket);
 
-                    // Preparar archivo de destino
-                    File receivedFile = new File(currentRootPath, nombre);
-                    
-                    final String finalNombre = nombre;
-
-                    // Manejo de archivo vacío
-                    if (tam == 0) {
-                        new File(currentRootPath + nombre).createNewFile();
-                        SwingUtilities.invokeLater(() -> {
-                            statusArea.append("Archivo vacío recibido: " + finalNombre + "\n");
-                            updateFileTree();
-                        });
-                        continue;
-                    }
-                    
-                    // Crear flujo de salida para guardar el archivo
-                    try(FileOutputStream fos = new FileOutputStream(receivedFile)){
-                        // Recibir paquetes de datos
-                        long recibidos = 0;
-                        int expectedSeq = 0;
-                        Map<Integer, byte[]> outOfOrderPackets = new HashMap<>();
-
-                        while (recibidos < tam) {
-                            receptionSocket.receive(packet);
-
-                            // Verificar si es el paquete final
-                            String dataStr = new String(packet.getData(), 0, packet.getLength());
-                            if ("END".equals(dataStr.trim())) {
-                                break;
-                            }
-
-                            // Procesar paquete normal
-                            ByteArrayInputStream bais = new ByteArrayInputStream(
-                                packet.getData(), 0, packet.getLength());
-                            DataInputStream dis = new DataInputStream(bais);
-                            int seqNumber = dis.readInt();
-                            byte[] fileData = new byte[packet.getLength() - 4];
-                            dis.readFully(fileData);
-
-                            // Manejar paquetes en orden
-                            if (seqNumber == expectedSeq) {
-                                fos.write(fileData);
-                                recibidos += fileData.length;
-                                expectedSeq++;
-
-                                // Procesar paquetes fuera de orden que estaban en buffer
-                                while (outOfOrderPackets.containsKey(expectedSeq)) {
-                                    fos.write(outOfOrderPackets.remove(expectedSeq));
-                                    recibidos += outOfOrderPackets.get(expectedSeq).length;
-                                    expectedSeq++;
-                                }
-                            } 
-                            // Almacenar paquetes fuera de orden
-                            else if (seqNumber > expectedSeq) {
-                                outOfOrderPackets.put(seqNumber, fileData);
-                            }
-
-                            // Enviar ACK (incluso para paquetes fuera de orden)
-                            ackData = ("ACK_" + seqNumber).getBytes();
-                            ackPacket = new DatagramPacket(
-                                ackData, ackData.length, packet.getAddress(), packet.getPort());
-                            receptionSocket.send(ackPacket);
-
-                            // Actualizar progreso
-                            final int porcentaje = (int) ((recibidos * 100) / tam);
+                        // Manejo de archivo vacío
+                        if (fileSize == 0) {
+                            new File(currentRootPath + fileName).createNewFile();
+                            final String name_final = fileName;
                             SwingUtilities.invokeLater(() -> {
-                                statusArea.append("\rRecibiendo: " + porcentaje + "%");
+                                statusArea.append("Archivo vacío recibido: " + name_final + "\n");
+                                updateFileTree();
                             });
+                            continue;
                         }
 
-                        fos.close();
-                        SwingUtilities.invokeLater(() -> {
-                            statusArea.append("\nArchivo recibido: " + finalNombre + "\n");
+                        // Preparar archivo de destino
+                        File receivedFile = new File(currentRootPath, fileName);
+
+                        // Crear flujo de salida para guardar el archivo
+                        try(FileOutputStream fos = new FileOutputStream(receivedFile)) {
+                            int expectedSeq = 0;
+                            long receivedBytes = 0;
+                            int retries = 0;
+                            final int MAX_RETRIES = 5;
+
+                            while (expectedSeq < totalPackets && retries < MAX_RETRIES) {
+                                receptionSocket.receive(packet);
+
+                                // Verificar si es paquete final
+                                if (packet.getLength() == 3 && 
+                                    new String(packet.getData(), 0, 3).equals("END")) {
+                                    break;
+                                }
+
+                                byte[] data = packet.getData();
+                                int seq = ((data[0]&0xFF)<<8)|(data[1]&0xFF);
+                                int tot = ((data[2]&0xFF)<<8)|(data[3]&0xFF);
+                                int payloadLen = packet.getLength() - 4;
+
+                                if (seq == expectedSeq) {
+                                    fos.write(data, 4, payloadLen);
+                                    receivedBytes += payloadLen;
+                                    expectedSeq++;
+                                    retries = 0; // Resetear contador de reintentos
+
+                                    // Enviar ACK
+                                    ackData = new byte[2];
+                                    ackData[0] = (byte)(expectedSeq-1 >> 8);
+                                    ackData[1] = (byte)(expectedSeq-1);
+                                    ackPacket = new DatagramPacket(ackData, ackData.length, 
+                                                                packet.getAddress(), packet.getPort());
+                                    receptionSocket.send(ackPacket);
+
+                                    // Actualizar progreso
+                                    final int progress = (int)((receivedBytes * 100.0) / fileSize);
+                                    final String fnf = fileName;
+                                    SwingUtilities.invokeLater(() -> {
+                                        statusArea.append("\rRecibiendo " + fnf + ": " + progress + "%");
+                                    });
+                                } else if (seq < expectedSeq) {
+                                    // Reenviar ACK para paquetes ya recibidos
+                                    ackData = new byte[2];
+                                    ackData[0] = (byte)(seq >> 8);
+                                    ackData[1] = (byte)(seq);
+                                    ackPacket = new DatagramPacket(ackData, ackData.length, 
+                                                                packet.getAddress(), packet.getPort());
+                                    receptionSocket.send(ackPacket);
+                                } else {
+                                    retries++;
+                                }
+                            }
+                            
+                            // Después de recibir el archivo
+                            File received = new File(currentRootPath, fileName);
+                            if (received.length() == fileSize) {
+                                SwingUtilities.invokeLater(() -> {
+                                    statusArea.append("\nArchivo recibido correctamente. Tamaño verificado: " + 
+                                                    received.length() + " bytes\n");
+                                });
+                            } else {
+                                SwingUtilities.invokeLater(() -> {
+                                    statusArea.append("\nERROR: Tamaño incorrecto. Esperado: " + fileSize + 
+                                                    " Recibido: " + received.length() + " bytes\n");
+                                });
+                                received.delete(); // Eliminar archivo incompleto
+                            }
                             updateFileTree();
-                        });
-                    } catch (Exception e){
+
+                            if (retries >= MAX_RETRIES) {
+                                SwingUtilities.invokeLater(() -> {
+                                    statusArea.append("\nERROR: Demasiados reintentos. Transferencia incompleta.\n");
+                                });
+                            }
+                        }
+                    } catch (NumberFormatException e) {
+                        statusArea.append("Error: Formato de handshake inválido\n");
+                        continue;
+                    } catch (Exception e) {
                         SwingUtilities.invokeLater(() -> {
                             statusArea.append("Error en recepción UDP: " + e.getMessage() + "\n");
                         });
