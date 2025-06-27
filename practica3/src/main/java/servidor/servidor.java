@@ -1,270 +1,464 @@
 package servidor;
 
-import java.net.*;
-import java.io.*;
-import java.util.*;
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.*;
-import javax.swing.tree.*;
-import javax.swing.filechooser.*;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class servidor {
+public class Servidor {
+    private static final int SERVER_PORT = 4446;
+    private static final int SERVER_PORTU = 4447;
+    private static final int BUFFER_SIZE = 1024;
+    private static final String MULTICAST_ADDRESS = "230.0.0.0";
+    private static final String DEFAULT_SERVER_FOLDER = "./Server";
+    private static final String GREEN = "\033[1;32m";
+    private static final String RESET = "\033[0m";
 
-    private static JTextArea statusArea;
-    private static ServerSocket serverSocket;
-    private static DefaultListModel<String> roomListModel;
-    private static DefaultListModel<String> userListModel;
-    private static HashMap<String, ArrayList<ClientHandler>> rooms = new HashMap<>();
-    private static HashMap<String, ClientHandler> users = new HashMap<>();
-    private static String fileStoragePath;
+    java.util.List<String> userList = Collections.synchronizedList(new ArrayList<>());
+    private static final Map<String, InetSocketAddress> userAddresses = new ConcurrentHashMap<>();
+    private static final Map<String, Set<InetSocketAddress>> chatRooms = new ConcurrentHashMap<>();
+    private static final Map<String, java.util.List<String>> roomHistories = new ConcurrentHashMap<>();
+
+    private static DatagramSocket fileSocket;
+    private static DatagramSocket unicastSocket;
+
+    private JFrame frame;
+    private JTextArea logArea;
+    private JList<String> userListView;
+    private JList<String> roomListView;
+    private DefaultListModel<String> userListModel;
+    private DefaultListModel<String> roomListModel;
+
+    static {
+        chatRooms.put("lobby", ConcurrentHashMap.newKeySet());
+        roomHistories.put("lobby", Collections.synchronizedList(new ArrayList<>()));
+        try {
+            unicastSocket = new DatagramSocket();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
     public static void main(String[] args) {
-        JFrame frame = new JFrame("Servidor de Chat");
+        SwingUtilities.invokeLater(() -> {
+            try {
+                new Servidor().start();
+            } catch (IOException e) {
+                JOptionPane.showMessageDialog(null, "Error al iniciar el servidor: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+    }
+
+    public Servidor() throws IOException {
+        fileSocket = new DatagramSocket(SERVER_PORTU);
+        initializeGUI();
+    }
+
+    private void initializeGUI() {
+        frame = new JFrame("Chat Servidor");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(800, 600);
         frame.setLayout(new BorderLayout());
 
-        // Panel superior
-        JPanel topPanel = new JPanel(new BorderLayout());
-        JButton selectFolderButton = new JButton("Seleccionar Carpeta para Archivos");
-        JButton startButton = new JButton("Iniciar Servidor");
-        topPanel.add(selectFolderButton, BorderLayout.WEST);
-        topPanel.add(startButton, BorderLayout.EAST);
+        JPanel leftPanel = new JPanel(new BorderLayout());
+        leftPanel.setPreferredSize(new Dimension(200, 600));
 
-        // Panel central con pestañas
-        JTabbedPane tabbedPane = new JTabbedPane();
-
-        // Panel de estado
-        statusArea = new JTextArea();
-        statusArea.setEditable(false);
-        JScrollPane statusScroll = new JScrollPane(statusArea);
-
-        // Panel de salas
-        JPanel roomPanel = new JPanel(new BorderLayout());
         roomListModel = new DefaultListModel<>();
-        JList<String> roomList = new JList<>(roomListModel);
-        JScrollPane roomScroll = new JScrollPane(roomList);
-        roomPanel.add(new JLabel("Salas activas:"), BorderLayout.NORTH);
-        roomPanel.add(roomScroll, BorderLayout.CENTER);
+        roomListView = new JList<>(roomListModel);
+        leftPanel.add(new JLabel("Salas"), BorderLayout.NORTH);
+        leftPanel.add(new JScrollPane(roomListView), BorderLayout.CENTER);
 
-        // Panel de usuarios
-        JPanel userPanel = new JPanel(new BorderLayout());
         userListModel = new DefaultListModel<>();
-        JList<String> userList = new JList<>(userListModel);
-        JScrollPane userScroll = new JScrollPane(userList);
-        userPanel.add(new JLabel("Usuarios conectados:"), BorderLayout.NORTH);
-        userPanel.add(userScroll, BorderLayout.CENTER);
+        userListView = new JList<>(userListModel);
+        leftPanel.add(new JLabel("Usuarios"), BorderLayout.SOUTH);
+        leftPanel.add(new JScrollPane(userListView), BorderLayout.SOUTH);
 
-        tabbedPane.addTab("Estado", statusScroll);
-        tabbedPane.addTab("Salas", roomPanel);
-        tabbedPane.addTab("Usuarios", userPanel);
+        frame.add(leftPanel, BorderLayout.WEST);
 
-        frame.add(topPanel, BorderLayout.NORTH);
-        frame.add(tabbedPane, BorderLayout.CENTER);
+        logArea = new JTextArea();
+        logArea.setEditable(false);
+        logArea.setLineWrap(true);
+        logArea.setWrapStyleWord(true);
+        frame.add(new JScrollPane(logArea), BorderLayout.CENTER);
 
-        // Listeners
-        selectFolderButton.addActionListener(e -> {
-            JFileChooser fileChooser = new JFileChooser();
-            fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-            if (fileChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
-                fileStoragePath = fileChooser.getSelectedFile().getAbsolutePath();
-                if (!fileStoragePath.endsWith(File.separator)) {
-                    fileStoragePath += File.separator;
-                }
-                statusArea.append("Carpeta para archivos seleccionada: " + fileStoragePath + "\n");
-            }
-        });
+        JPanel controlPanel = new JPanel(new FlowLayout());
+        JButton clearLogButton = new JButton("Clear Log");
+        clearLogButton.addActionListener(e -> logArea.setText(""));
+        controlPanel.add(clearLogButton);
 
-        startButton.addActionListener(e -> startServer());
+        JButton refreshButton = new JButton("Actualizar listas");
+        refreshButton.addActionListener(e -> updateLists());
+        controlPanel.add(refreshButton);
+
+        frame.add(controlPanel, BorderLayout.SOUTH);
 
         frame.setVisible(true);
     }
 
-    private static void startServer() {
+    public void start() throws IOException {
+        MulticastSocket serverSocket = new MulticastSocket(SERVER_PORT);
+        InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
+
+        log("Servidor inciado! Esperando conexiones...");
+
         new Thread(() -> {
             try {
-                serverSocket = new ServerSocket(8000);
-                serverSocket.setReuseAddress(true);
-                statusArea.append("Servidor de chat iniciado en el puerto 8000\n");
-
                 while (true) {
-                    Socket clientSocket = serverSocket.accept();
-                    new ClientHandler(clientSocket).start();
+                    byte[] buf = new byte[BUFFER_SIZE];
+                    DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                    serverSocket.receive(packet);
+                    new Thread(new ClientHandler(serverSocket, packet, group)).start();
                 }
             } catch (IOException e) {
-                statusArea.append("Error en el servidor: " + e.getMessage() + "\n");
+                log("Server error: " + e.getMessage());
             }
         }).start();
     }
 
-    public static synchronized void addRoom(String roomName) {
-        if (!rooms.containsKey(roomName)) {
-            rooms.put(roomName, new ArrayList<>());
-            roomListModel.addElement(roomName);
-            statusArea.append("Nueva sala creada: " + roomName + "\n");
-        }
-    }
+    private class ClientHandler implements Runnable {
+        private final MulticastSocket serverSocket;
+        private final DatagramPacket receivePacket;
+        private final InetAddress group;
 
-    public static synchronized void addUser(String username, ClientHandler handler) {
-        users.put(username, handler);
-        userListModel.addElement(username);
-        statusArea.append("Usuario conectado: " + username + "\n");
-    }
-
-    public static synchronized void removeUser(String username) {
-        users.remove(username);
-        userListModel.removeElement(username);
-        statusArea.append("Usuario desconectado: " + username + "\n");
-    }
-
-    public static synchronized void broadcastToRoom(String room, String message, String sender) {
-        if (rooms.containsKey(room)) {
-            for (ClientHandler client : rooms.get(room)) {
-                if (!client.getUsername().equals(sender)) {
-                    client.sendMessage("ROOM:" + room + ":" + sender + ":" + message);
-                }
-            }
-        }
-    }
-
-    public static synchronized void sendPrivateMessage(String recipient, String message, String sender) {
-        if (users.containsKey(recipient)) {
-            users.get(recipient).sendMessage("PRIVATE:" + sender + ":" + message);
-        }
-    }
-
-    public static synchronized void sendFileToRoom(String room, String filename, long size, String sender) {
-        if (rooms.containsKey(room)) {
-            for (ClientHandler client : rooms.get(room)) {
-                if (!client.getUsername().equals(sender)) {
-                    client.sendMessage("FILE_ROOM:" + room + ":" + sender + ":" + filename + ":" + size);
-                }
-            }
-        }
-    }
-
-    public static synchronized void sendPrivateFile(String recipient, String filename, long size, String sender) {
-        if (users.containsKey(recipient)) {
-            users.get(recipient).sendMessage("FILE_PRIVATE:" + sender + ":" + filename + ":" + size);
-        }
-    }
-
-    private static class ClientHandler extends Thread {
-        private Socket socket;
-        private DataInputStream dis;
-        private DataOutputStream dos;
-        private String username;
-        private String currentRoom;
-
-        public ClientHandler(Socket socket) {
-            this.socket = socket;
+        ClientHandler(MulticastSocket s, DatagramPacket p, InetAddress g) {
+            this.serverSocket = s;
+            this.receivePacket = p;
+            this.group = g;
         }
 
-        public String getUsername() {
-            return username;
-        }
-
+        @Override
         public void run() {
             try {
-                dis = new DataInputStream(socket.getInputStream());
-                dos = new DataOutputStream(socket.getOutputStream());
+                String msg = new String(receivePacket.getData(), 0, receivePacket.getLength(), StandardCharsets.UTF_8).trim();
+                InetAddress addr = receivePacket.getAddress();
+                int port = receivePacket.getPort();
+                handleClientMessage(serverSocket, msg, addr, port, group);
+            } catch (Exception e) {
+                log("Error handling client: " + e.getMessage());
+            }
+        }
+    }
 
-                // Autenticación
-                username = dis.readUTF();
-                addUser(username, this);
+    private void handleClientMessage(MulticastSocket serverSocket,
+                                    String message,
+                                    InetAddress clientAddress,
+                                    int clientPort,
+                                    InetAddress group) throws IOException, InterruptedException {
+        String[] parts = message.split(":", 5);
+        String action = parts[0];
+        InetSocketAddress clientSock = new InetSocketAddress(clientAddress, clientPort);
+        
 
-                // Manejo de mensajes
-                while (true) {
-                    String type = dis.readUTF();
-                    
-                    if (type.equals("JOIN_ROOM")) {
-                        String room = dis.readUTF();
-                        joinRoom(room);
-                    } 
-                    else if (type.equals("LEAVE_ROOM")) {
-                        leaveRoom();
-                    }
-                    else if (type.equals("ROOM_MSG")) {
-                        String room = dis.readUTF();
-                        String message = dis.readUTF();
-                        broadcastToRoom(room, message, username);
-                    }
-                    else if (type.equals("PRIVATE_MSG")) {
-                        String recipient = dis.readUTF();
-                        String message = dis.readUTF();
-                        sendPrivateMessage(recipient, message, username);
-                    }
-                    else if (type.equals("FILE_ROOM")) {
-                        String room = dis.readUTF();
-                        String filename = dis.readUTF();
-                        long size = dis.readLong();
-                        sendFileToRoom(room, filename, size, username);
-                        receiveFile(filename, size);
-                    }
-                    else if (type.equals("FILE_PRIVATE")) {
-                        String recipient = dis.readUTF();
-                        String filename = dis.readUTF();
-                        long size = dis.readLong();
-                        sendPrivateFile(recipient, filename, size, username);
-                        receiveFile(filename, size);
-                    }
+        switch (action) {
+            case "JOIN": {
+                String user = parts[1];
+                userList.add(user);
+                userAddresses.put(user, clientSock);
+                chatRooms.get("lobby").add(clientSock);
+                log(user + " se unió al lobby.");
+                sendUserList(serverSocket, group);
+
+                StringBuilder sb = new StringBuilder();
+                chatRooms.forEach((r, members) -> sb.append(r)
+                        .append(" (")
+                        .append(members.size())
+                        .append(" usuarios),"));
+                if (sb.length() > 0) sb.setLength(sb.length() - 1);
+                sendUnicast(serverSocket, "ROOMS:" + sb, clientSock);
+
+                updateLists();
+            } break;
+
+            case "LEAVE": {
+                String user = parts[1];
+                userList.remove(user);
+                userAddresses.remove(user);
+                chatRooms.values().forEach(set -> set.remove(clientSock));
+                log(user + " disconnected.");
+                broadcastMulticast(serverSocket, GREEN + user + RESET + " has left", group);
+                sendUserList(serverSocket, group);
+                updateLists();
+            } break;
+
+            case "ASKUSERS": {
+                String user = parts[1];
+                askUserList(serverSocket, user, clientSock);
+            } break;
+
+            case "CREATE_ROOM": {
+                String room = parts[1];
+                if (!chatRooms.containsKey(room)) {
+                    chatRooms.put(room, ConcurrentHashMap.newKeySet());
+                    roomHistories.put(room, Collections.synchronizedList(new ArrayList<>()));
+                    broadcastMulticast(serverSocket, "ROOM_CREATED:" + room, group);
+                    log("Room created: " + room);
+                    updateLists();
                 }
-            } catch (IOException e) {
-                try {
-                    if (currentRoom != null) leaveRoom();
-                    removeUser(username);
-                    socket.close();
-                } catch (IOException ex) {
-                    statusArea.append("Error al cerrar conexión: " + ex.getMessage() + "\n");
+            } break;
+            
+            case "CHECK_ROOM": {
+                String room = parts[1];
+                String user = parts[2];
+                InetSocketAddress client = userAddresses.get(user);
+
+                if (chatRooms.getOrDefault(room, Collections.emptySet()).contains(client)) {
+                    sendUnicast(serverSocket, "VALID_ROOM:" + room, client);
+                } else {
+                    sendUnicast(serverSocket, "INVALID_ROOM:" + room, client);
+                    // Mover al usuario al lobby si no está en la sala
+                    chatRooms.values().forEach(set -> set.remove(client));
+                    chatRooms.get("lobby").add(client);
+                    sendUnicast(serverSocket, "JOINED_ROOM:lobby", client);
                 }
-            }
-        }
+            } break;
 
-        private void joinRoom(String room) {
-            if (currentRoom != null) leaveRoom();
-            
-            addRoom(room);
-            rooms.get(room).add(this);
-            currentRoom = room;
-            sendMessage("JOINED_ROOM:" + room);
-            statusArea.append(username + " se unió a la sala " + room + "\n");
-        }
+            case "LIST_ROOMS": {
+                StringBuilder sb = new StringBuilder();
+                chatRooms.forEach((r, members) -> sb.append(r)
+                        .append(" (")
+                        .append(members.size())
+                        .append(" usuarios),"));
+                if (sb.length()>0) sb.setLength(sb.length()-1);
+                sendUnicast(serverSocket, "ROOMS:" + sb, clientSock);
+            } break;
 
-        private void leaveRoom() {
-            if (currentRoom != null && rooms.containsKey(currentRoom)) {
-                rooms.get(currentRoom).remove(this);
-                sendMessage("LEFT_ROOM:" + currentRoom);
-                statusArea.append(username + " abandonó la sala " + currentRoom + "\n");
-                currentRoom = null;
-            }
-        }
+            case "JOIN_ROOM": {
+                String room = parts[1];
+                String username = parts[2];
 
-        private void receiveFile(String filename, long size) throws IOException {
-            filename = filename.replace("..", "").replace("/", "").replace("\\", "");
-            File file = new File(fileStoragePath + filename);
-            FileOutputStream fos = new FileOutputStream(file);
+                // Mover al cliente de todas las salas a la nueva sala
+                chatRooms.values().forEach(set -> set.remove(clientSock));
+                chatRooms.computeIfAbsent(room, r -> ConcurrentHashMap.newKeySet())
+                         .add(clientSock);
+
+                // Actualizar dirección del usuario
+                userAddresses.put(username, clientSock);
+
+                // Enviar confirmación al cliente
+                sendUnicast(serverSocket, "JOINED_ROOM:" + room, clientSock);
+
+                // Enviar historial de la sala
+                java.util.List<String> history = roomHistories.getOrDefault(room, 
+                    Collections.synchronizedList(new ArrayList<>()));
+                for (String msg : history) {
+                    sendUnicast(serverSocket, "HISTORY:" + room + ":" + msg, clientSock);
+                }
+
+                // Actualizar listas
+                sendUserList(serverSocket, group);
+                updateLists();
+                log(username + " se unió a: " + room);
+            } break;
+
+            case "LEAVE_ROOM": {
+                String room = parts[1];
+                chatRooms.getOrDefault(room, Collections.emptySet()).remove(clientSock);
+
+                // Añadir al lobby solo si no está ya en otra sala
+                if (getCurrentRoomForUser(clientSock) == null) {
+                    chatRooms.get("lobby").add(clientSock);
+                }
+
+                sendUnicast(serverSocket, "LEFT_ROOM:" + room, clientSock);
+                log(clientSock + " left room: " + room);
+                updateLists();
+            } break;
+
+            case "MSG_ROOM": {
+                String targetRoom = parts[1];
+                String sender = parts[2];
+                String content = parts[3];
+                String time = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                String fullMsg = "["+time+"] " + sender + ": " + content;
+
+                InetSocketAddress client = userAddresses.get(sender);
+
+                // Verificación doble de membresía
+                if (chatRooms.getOrDefault(targetRoom, Collections.emptySet()).contains(client)) {
+                    roomHistories.computeIfAbsent(targetRoom, k -> Collections.synchronizedList(new ArrayList<>()))
+                                .add(fullMsg);
+
+                    chatRooms.get(targetRoom).forEach(dest -> {
+                        sendUnicast(serverSocket, targetRoom + " | " + fullMsg, dest);
+                    });
+                    log(sender + " envió mensaje a " + targetRoom);
+                } else {
+                    // Mover al usuario al lobby y notificar
+                    chatRooms.values().forEach(set -> set.remove(client));
+                    chatRooms.get("lobby").add(client);
+                    sendUnicast(serverSocket, "JOINED_ROOM:lobby", client);
+                    sendUnicast(serverSocket, "[ERROR] Fuiste movido al lobby porque no estabas en " + targetRoom, client);
+                    log(sender + " fue movido al lobby al intentar enviar a " + targetRoom);
+                }
+            } break;
+
+            case "PRIVATE": {
+                String from = parts[1], to = parts[2], txt = parts[3];
+                String time = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                InetSocketAddress dest = userAddresses.get(to);
+                if (dest != null) {
+                    sendUnicast(serverSocket, "[PRIVATE][" + time + "] " + from + ": " + txt, dest);
+                    sendUnicast(serverSocket, "[PRIVATE][" + time + "] Para " + to + ": " + txt, 
+                               userAddresses.get(from));
+                    log("Private message from " + from + " to " + to);
+                } else {
+                    sendUnicast(serverSocket, "[ERROR] Usuario " + to + " no encontrado", 
+                               userAddresses.get(from));
+                }
+            } break;
+
+            case "FILE": {
+                String fileName = parts[1];
+                int length = Integer.parseInt(parts[2]);
+                receiveFile(fileSocket, clientAddress, clientPort, fileName, length);
+                broadcastMulticast(serverSocket, "Archivo disponible:" + fileName, group);
+                log("Archivo recibido y notificado: " + fileName);
+            } break;
+
+            default:
+                log("Accion desconocida: " + action);
+        }
+    }
+
+    private static void broadcastMulticast(MulticastSocket sock, String msg, InetAddress group) throws IOException {
+        byte[] buf = msg.getBytes(StandardCharsets.UTF_8);
+        sock.send(new DatagramPacket(buf, buf.length, group, SERVER_PORT));
+        if (!msg.startsWith("ROOMS:")) {
+            StringBuilder sb = new StringBuilder();
+            chatRooms.forEach((r, members) -> sb.append(r).append(",")); // Solo nombres, sin conteo
+            if (sb.length() > 0) sb.setLength(sb.length() - 1);
+            String roomsMsg = "ROOMS:" + sb.toString();
+            byte[] roomsBuf = roomsMsg.getBytes(StandardCharsets.UTF_8);
+            sock.send(new DatagramPacket(roomsBuf, roomsBuf.length, group, SERVER_PORT));
+        }
+    }
+
+    private void sendUnicast(DatagramSocket sock, String msg, InetSocketAddress dest) {
+        try {
+            byte[] buf = msg.getBytes(StandardCharsets.UTF_8);
+            sock.send(new DatagramPacket(buf, buf.length, dest.getAddress(), dest.getPort()));
+            log("UNICAST ➜ " + dest + " : " + msg);
+        } catch (IOException e) {
+            log("Error sending to " + dest + ", removing client.");
+            userAddresses.values().remove(dest);
+            chatRooms.values().forEach(set -> set.remove(dest));
+            updateLists();
+        }
+    }
+
+    private void sendUserList(MulticastSocket sock, InetAddress group) throws IOException {
+        String msg = "USERS:" + String.join(",", userList);
+        broadcastMulticast(sock, msg, group);
+    }
+
+    private void askUserList(DatagramSocket sock, String user, InetSocketAddress dest) throws IOException {
+        String msg = "USERS:" + user + "=" + String.join(",", userList);
+        byte[] buf = msg.getBytes(StandardCharsets.UTF_8);
+        sock.send(new DatagramPacket(buf, buf.length, dest.getAddress(), dest.getPort()));
+    }
+
+    public static void receiveFile(DatagramSocket sock,
+                                 InetAddress addr,
+                                 int port,
+                                 String fileName,
+                                 int fileLength) throws IOException {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fileChooser.setDialogTitle("Seleccionar carpeta para guardar archivos");
+        fileChooser.setCurrentDirectory(new File(DEFAULT_SERVER_FOLDER));
+        
+        if (fileChooser.showSaveDialog(null) == JFileChooser.APPROVE_OPTION) {
+            File dir = fileChooser.getSelectedFile();
+            if (!dir.exists()) dir.mkdirs();
             
-            long received = 0;
-            byte[] buffer = new byte[4096];
-            int read;
-            
-            while (received < size && (read = dis.read(buffer, 0, (int) Math.min(buffer.length, size - received))) != -1) {
-                fos.write(buffer, 0, read);
-                received += read;
+            FileOutputStream fos = new FileOutputStream(new File(dir, fileName));
+            byte[] buf = new byte[BUFFER_SIZE];
+            int received = 0, expectedSeq = 0;
+
+            while (received < fileLength) {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                sock.receive(p);
+                int seq = byteArrayToInt(p.getData(), 0);
+                if (seq == expectedSeq) {
+                    fos.write(p.getData(), 4, p.getLength() - 4);
+                    expectedSeq++;
+                    received += p.getLength() - 4;
+                }
+                String ack = "ACK:" + seq;
+                sock.send(new DatagramPacket(ack.getBytes(), ack.length(), addr, port));
             }
-            
             fos.close();
-            statusArea.append("Archivo recibido: " + filename + " (" + size + " bytes)\n");
         }
+    }
 
-        public void sendMessage(String message) {
-            try {
-                dos.writeUTF(message);
-                dos.flush();
-            } catch (IOException e) {
-                statusArea.append("Error al enviar mensaje a " + username + ": " + e.getMessage() + "\n");
-            }
+    public static void sendFileToAll(MulticastSocket sock,
+                                   String fileName,
+                                   InetAddress group) throws IOException, InterruptedException {
+        broadcastMulticast(sock, "FILE_HDR:" + fileName, group);
+        File f = new File(DEFAULT_SERVER_FOLDER + "/" + fileName);
+        FileInputStream fis = new FileInputStream(f);
+        byte[] data = new byte[BUFFER_SIZE - 4];
+        int seq = 0, len;
+
+        while ((len = fis.read(data)) != -1) {
+            byte[] packet = new byte[len + 4];
+            addSequence(packet, seq);
+            System.arraycopy(data, 0, packet, 4, len);
+            sock.send(new DatagramPacket(packet, packet.length, group, SERVER_PORT));
+            Thread.sleep(5);
+            seq++;
         }
+        broadcastMulticast(sock, "FILE_EOF:" + fileName, group);
+        fis.close();
+    }
+
+    private static void addSequence(byte[] buf, int seq) {
+        buf[0] = (byte)(seq >> 24);
+        buf[1] = (byte)(seq >> 16);
+        buf[2] = (byte)(seq >> 8);
+        buf[3] = (byte)(seq);
+    }
+
+    private static int byteArrayToInt(byte[] arr, int off) {
+        return ((arr[off]&0xFF)<<24) |
+                ((arr[off+1]&0xFF)<<16) |
+                ((arr[off+2]&0xFF)<<8) |
+                (arr[off+3]&0xFF);
+    }
+
+    private void log(String message) {
+        SwingUtilities.invokeLater(() -> {
+            logArea.append(message + "\n");
+            logArea.setCaretPosition(logArea.getDocument().getLength());
+        });
+    }
+
+    private void updateLists() {
+        SwingUtilities.invokeLater(() -> {
+            userListModel.clear();
+            for (String user : userList) {
+                userListModel.addElement(user);
+            }
+
+            roomListModel.clear();
+            for (String room : chatRooms.keySet()) {
+                roomListModel.addElement(room + " (" + chatRooms.get(room).size() + " usuarios)");
+            }
+        });
+    }
+    
+    private String getCurrentRoomForUser(InetSocketAddress clientSock) {
+        String nonLobbyRoom = chatRooms.entrySet().stream()
+            .filter(entry -> !entry.getKey().equals("lobby") && entry.getValue().contains(clientSock))
+            .map(Map.Entry::getKey)
+            .findFirst()
+            .orElse(null);
+
+        return nonLobbyRoom != null ? nonLobbyRoom : 
+               (chatRooms.get("lobby").contains(clientSock) ? "lobby" : null);
     }
 }

@@ -1,394 +1,603 @@
 package cliente;
 
-import java.net.*;
-import java.io.*;
-import java.util.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import javax.swing.tree.*;
-import javax.swing.filechooser.*;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class cliente {
+public class Cliente {
+    private static final int SERVER_PORT = 4446;
+    private static final int SERVER_PORTU = 4447;
+    private static final int BUFFER_SIZE = 1024;
+    private static final String MULTICAST_ADDR = "230.0.0.0";
+    private static String SERVER_ADDR = "localhost";
+    
+    java.util.List<String> userList = Collections.synchronizedList(new ArrayList<>());
+    private static final Map<String, InetSocketAddress> userAddresses = new ConcurrentHashMap<>();
+    private static final Map<String, Set<InetSocketAddress>> chatRooms = new ConcurrentHashMap<>();
+    private static final Map<String, java.util.List<String>> roomHistories = new ConcurrentHashMap<>();
 
-    private static JTextArea chatArea;
-    private static JList<String> userList;
-    private static DefaultListModel<String> userListModel;
-    private static JList<String> roomList;
-    private static DefaultListModel<String> roomListModel;
-    private static JTextField messageField;
-    private static JTextField usernameField;
-    private static JComboBox<String> recipientCombo;
-    private static Socket socket;
-    private static DataInputStream dis;
-    private static DataOutputStream dos;
-    private static String username;
-    private static String currentRoom;
-    private static String fileStoragePath;
+    private String username;
+    private String currentRoom = "lobby";
+    private AtomicBoolean awaitingFile = new AtomicBoolean(false);
+    private int fileCount = 0;
+
+    private MulticastSocket mcastSocket;
+    private DatagramSocket unicastSocket;
+    private InetAddress group;
+    private InetAddress serverAddress;
+    
+
+    // Componentes de la interfaz
+    private JFrame frame;
+    private JTextArea chatArea;
+    private JTextField inputField;
+    private JList<String> userListView;
+    private JList<String> roomList;
+    private DefaultListModel<String> userListModel;
+    private DefaultListModel<String> roomListModel;
+    
+    static {
+        chatRooms.put("lobby", ConcurrentHashMap.newKeySet());
+        roomHistories.put("lobby", Collections.synchronizedList(new ArrayList<>()));
+    }
 
     public static void main(String[] args) {
-        JFrame frame = new JFrame("Cliente de Chat");
+        SwingUtilities.invokeLater(() -> {
+            String username = JOptionPane.showInputDialog(null, "Nombre de usuario:", "Chat Cliente", JOptionPane.PLAIN_MESSAGE);
+            if (username != null && !username.trim().isEmpty()) {
+                try {
+                    new Cliente(username.trim()).start();
+                } catch (IOException e) {
+                    JOptionPane.showMessageDialog(null, "Error al iniciar el cliente: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                } catch (Exception ex) {
+                    Logger.getLogger(Cliente.class.getName()).log(Level.SEVERE, null, ex);
+                }
+            }
+        });
+    }
+
+    public Cliente(String username) throws IOException {
+        this.username = username;
+        
+        // Pedir IP del servidor
+        SERVER_ADDR = JOptionPane.showInputDialog(null, 
+            "Dirección IP del servidor:", 
+            "localhost");
+        if (SERVER_ADDR == null || SERVER_ADDR.trim().isEmpty()) {
+            SERVER_ADDR = "localhost";
+        }
+        
+        mcastSocket = new MulticastSocket(SERVER_PORT);
+        unicastSocket = new DatagramSocket();
+        group = InetAddress.getByName(MULTICAST_ADDR);
+        serverAddress = InetAddress.getByName(SERVER_ADDR);
+        mcastSocket.joinGroup(group);
+
+        initializeGUI();
+        requestRoomList();
+    }
+
+    private void initializeGUI() {
+        frame = new JFrame("Chat Cliente - " + username + " [" + SERVER_ADDR + "]");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(900, 700);
+        frame.setSize(800, 600);
         frame.setLayout(new BorderLayout());
+        
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                try {
+                    if (currentRoom != null) {
+                        send("LEAVE_ROOM:" + currentRoom);
+                    }
+                    send("LEAVE:" + username);
+                } catch (IOException ex) {
+                    System.err.println("Error al cerrar la conexión: " + ex.getMessage());
+                } finally {
+                    System.exit(0);
+                }
+            }
+        });
 
-        // Panel de conexión
-        JPanel connectionPanel = new JPanel(new FlowLayout());
-        JLabel serverLabel = new JLabel("Servidor:");
-        JTextField serverField = new JTextField("localhost", 10);
-        JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5);
-        JLabel userLabel = new JLabel("Usuario:");
-        usernameField = new JTextField(10);
-        JButton connectButton = new JButton("Conectar");
-        JButton disconnectButton = new JButton("Desconectar");
-        disconnectButton.setEnabled(false);
+        // Panel izquierdo con listas de usuarios y salas
+        JPanel leftPanel = new JPanel(new BorderLayout());
+        leftPanel.setPreferredSize(new Dimension(200, 600));
+        
+        JLabel currentRoomLabel = new JLabel("Sala actual: lobby");
+        frame.add(currentRoomLabel, BorderLayout.NORTH);
 
-        connectionPanel.add(serverLabel);
-        connectionPanel.add(serverField);
-        connectionPanel.add(portLabel);
-        connectionPanel.add(portField);
-        connectionPanel.add(userLabel);
-        connectionPanel.add(usernameField);
-        connectionPanel.add(connectButton);
-        connectionPanel.add(disconnectButton);
-
-        // Panel principal con división vertical
-        JSplitPane mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
-
-        // Panel de chat superior
-        JPanel chatPanel = new JPanel(new BorderLayout());
-        chatArea = new JTextArea();
-        chatArea.setEditable(false);
-        JScrollPane chatScroll = new JScrollPane(chatArea);
-        messageField = new JTextField();
-        JButton sendButton = new JButton("Enviar");
-        JButton sendFileButton = new JButton("Enviar Archivo");
-
-        JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.add(messageField, BorderLayout.CENTER);
-        JPanel buttonPanel = new JPanel(new GridLayout(1, 2));
-        buttonPanel.add(sendButton);
-        buttonPanel.add(sendFileButton);
-        messagePanel.add(buttonPanel, BorderLayout.EAST);
-
-        chatPanel.add(chatScroll, BorderLayout.CENTER);
-        chatPanel.add(messagePanel, BorderLayout.SOUTH);
-
-        // Panel inferior con división horizontal
-        JSplitPane bottomSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-
-        // Panel de salas
-        JPanel roomPanel = new JPanel(new BorderLayout());
         roomListModel = new DefaultListModel<>();
         roomList = new JList<>(roomListModel);
-        JScrollPane roomScroll = new JScrollPane(roomList);
-        JTextField newRoomField = new JTextField();
-        JButton createRoomButton = new JButton("Crear/Unirse");
-        JButton leaveRoomButton = new JButton("Salir");
+        leftPanel.add(new JLabel("Salas"), BorderLayout.NORTH);
+        leftPanel.add(new JScrollPane(roomList), BorderLayout.CENTER);
 
-        JPanel roomControlPanel = new JPanel(new BorderLayout());
-        roomControlPanel.add(newRoomField, BorderLayout.CENTER);
-        roomControlPanel.add(createRoomButton, BorderLayout.EAST);
-
-        JPanel roomButtonPanel = new JPanel(new GridLayout(1, 2));
-        roomButtonPanel.add(createRoomButton);
-        roomButtonPanel.add(leaveRoomButton);
-
-        roomPanel.add(new JLabel("Salas disponibles:"), BorderLayout.NORTH);
-        roomPanel.add(roomScroll, BorderLayout.CENTER);
-        roomPanel.add(roomControlPanel, BorderLayout.SOUTH);
-
-        // Panel de usuarios
-        JPanel userPanel = new JPanel(new BorderLayout());
         userListModel = new DefaultListModel<>();
-        userList = new JList<>(userListModel);
-        JScrollPane userScroll = new JScrollPane(userList);
-        JLabel recipientLabel = new JLabel("Enviar privado a:");
-        recipientCombo = new JComboBox<>();
-        recipientCombo.addItem("Todos en la sala");
+        userListView = new JList<>(userListModel);
+        leftPanel.add(new JLabel("Usuarios"), BorderLayout.SOUTH);
+        leftPanel.add(new JScrollPane(userListView), BorderLayout.SOUTH);
 
-        JPanel recipientPanel = new JPanel(new BorderLayout());
-        recipientPanel.add(recipientLabel, BorderLayout.WEST);
-        recipientPanel.add(recipientCombo, BorderLayout.CENTER);
+        frame.add(leftPanel, BorderLayout.WEST);
 
-        userPanel.add(new JLabel("Usuarios conectados:"), BorderLayout.NORTH);
-        userPanel.add(userScroll, BorderLayout.CENTER);
-        userPanel.add(recipientPanel, BorderLayout.SOUTH);
+        // Área de chat central
+        chatArea = new JTextArea();
+        chatArea.setEditable(false);
+        chatArea.setLineWrap(true);
+        chatArea.setWrapStyleWord(true);
+        frame.add(new JScrollPane(chatArea), BorderLayout.CENTER);
 
-        bottomSplitPane.setLeftComponent(roomPanel);
-        bottomSplitPane.setRightComponent(userPanel);
-        bottomSplitPane.setDividerLocation(300);
+        // Panel inferior con entrada de texto y botones
+        JPanel bottomPanel = new JPanel(new BorderLayout());
+        inputField = new JTextField();
+        inputField.addActionListener(e -> sendMessage());
+        bottomPanel.add(inputField, BorderLayout.CENTER);
 
-        mainSplitPane.setTopComponent(chatPanel);
-        mainSplitPane.setBottomComponent(bottomSplitPane);
-        mainSplitPane.setDividerLocation(400);
-
-        frame.add(connectionPanel, BorderLayout.NORTH);
-        frame.add(mainSplitPane, BorderLayout.CENTER);
-
-        // Listeners
-        connectButton.addActionListener(e -> {
-            String server = serverField.getText();
-            int port = Integer.parseInt(portField.getText());
-            username = usernameField.getText().trim();
-            
-            if (username.isEmpty()) {
-                JOptionPane.showMessageDialog(frame, "Ingrese un nombre de usuario", "Error", JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-
-            try {
-                socket = new Socket(server, port);
-                dis = new DataInputStream(socket.getInputStream());
-                dos = new DataOutputStream(socket.getOutputStream());
-                
-                // Enviar nombre de usuario
-                dos.writeUTF(username);
-                dos.flush();
-                
-                // Iniciar hilo para recibir mensajes
-                new Thread(() -> receiveMessages()).start();
-                
-                connectButton.setEnabled(false);
-                disconnectButton.setEnabled(true);
-                usernameField.setEnabled(false);
-                chatArea.append("Conectado al servidor como " + username + "\n");
-            } catch (IOException ex) {
-                JOptionPane.showMessageDialog(frame, "Error al conectar: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-            }
-        });
-
-        disconnectButton.addActionListener(e -> disconnect());
-
+        JButton sendButton = new JButton("Envíar");
         sendButton.addActionListener(e -> sendMessage());
+        bottomPanel.add(sendButton, BorderLayout.EAST);
 
-        messageField.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
-                sendMessage();
+        // Panel de botones de comandos
+        JPanel commandPanel = new JPanel(new FlowLayout());
+        
+        JButton changeServerButton = new JButton("Cambiar Servidor");
+        changeServerButton.addActionListener(e -> {
+            String newIp = JOptionPane.showInputDialog(frame, 
+                "Nueva dirección IP del servidor:", 
+                SERVER_ADDR);
+            if (newIp != null && !newIp.trim().isEmpty()) {
+                try {
+                    SERVER_ADDR = newIp.trim();
+                    serverAddress = InetAddress.getByName(SERVER_ADDR);
+                    frame.setTitle("Chat Cliente - " + username + " [" + SERVER_ADDR + "]");
+                    send("JOIN:" + username);
+                    chatArea.append("Conectado al nuevo servidor: " + SERVER_ADDR + "\n");
+                } catch (IOException ex) {
+                    showError("Error al cambiar de servidor: " + ex.getMessage());
+                }
             }
         });
+        commandPanel.add(changeServerButton);
+        
+        JButton privateMessageButton = new JButton("Mensaje Privado");
+        privateMessageButton.addActionListener(e -> {
+            String selectedUser = userListView.getSelectedValue();
+            if (selectedUser != null && !selectedUser.equals(username)) {
+                String message = JOptionPane.showInputDialog(frame, "Mensaje para " + selectedUser + ":");
+                if (message != null && !message.trim().isEmpty()) {
+                    try {
+                        send("PRIVATE:" + username + ":" + selectedUser + ":" + message);
+                    } catch (IOException ex) {
+                        showError("Error al enviar mensaje privado: " + ex.getMessage());
+                    }
+                }
+            } else {
+                showError("Selecciona un usuario válido para enviar mensaje privado");
+            }
+        });
+        commandPanel.add(privateMessageButton);
+        
+        JButton refreshButton = new JButton("Actualizar listas");
+        refreshButton.addActionListener(e -> requestRoomList());
+        commandPanel.add(refreshButton);
 
-        sendFileButton.addActionListener(e -> sendFile());
-
+        JButton createRoomButton = new JButton("Crear sala");
         createRoomButton.addActionListener(e -> {
-            String roomName = newRoomField.getText().trim();
-            if (!roomName.isEmpty()) {
+            String roomName = JOptionPane.showInputDialog(frame, "Nombre de la sala:");
+            if (roomName != null && !roomName.trim().isEmpty()) {
                 try {
-                    dos.writeUTF("JOIN_ROOM");
-                    dos.writeUTF(roomName);
-                    dos.flush();
-                    currentRoom = roomName;
-                    newRoomField.setText("");
+                    send("CREATE_ROOM:" + roomName.trim());
                 } catch (IOException ex) {
-                    chatArea.append("Error al unirse a la sala: " + ex.getMessage() + "\n");
+                    showError("Error al crear la sala: " + ex.getMessage());
                 }
             }
         });
+        commandPanel.add(createRoomButton);
 
+        JButton joinRoomButton = new JButton("Unirse a sala");
+        joinRoomButton.addActionListener(e -> {
+            String selectedRoom = roomList.getSelectedValue();
+            if (selectedRoom != null) {
+                String cleanRoomName = selectedRoom.split("\\s+")[0].trim();
+                if (!cleanRoomName.isEmpty() && !cleanRoomName.equals(currentRoom)) {
+                    try {
+                        send("JOIN_ROOM:" + cleanRoomName + ":" + username);
+                        // Actualizar la currentRoom del cliente inmediatamente
+                        currentRoom = cleanRoomName;
+                        SwingUtilities.invokeLater(() -> {
+                            frame.setTitle("Chat Cliente - " + username + " (" + currentRoom + ") [" + SERVER_ADDR + "]");
+                            chatArea.append("=== Intentando unirse a: " + currentRoom + " ===\n");
+                        });
+                    } catch (IOException ex) {
+                        showError("Error al unirse a sala: " + ex.getMessage());
+                    }
+                } else if (cleanRoomName.equals(currentRoom)) {
+                    showError("Ya estás en la sala " + currentRoom);
+                }
+            } else {
+                showError("Por favor selecciona una sala primero");
+            }
+        });
+        commandPanel.add(joinRoomButton);
+
+        JButton leaveRoomButton = new JButton("Salir de la sala");
         leaveRoomButton.addActionListener(e -> {
-            if (currentRoom != null) {
+            try {
+                send("LEAVE_ROOM:" + currentRoom);
+            } catch (IOException ex) {
+                showError("Error al salir de la sala: " + ex.getMessage());
+            }
+        });
+        commandPanel.add(leaveRoomButton);
+
+        JButton sendFileButton = new JButton("Envíar archivo");
+        sendFileButton.addActionListener(e -> {
+            JFileChooser fileChooser = new JFileChooser();
+            int returnValue = fileChooser.showOpenDialog(frame);
+            if (returnValue == JFileChooser.APPROVE_OPTION) {
+                File selectedFile = fileChooser.getSelectedFile();
                 try {
-                    dos.writeUTF("LEAVE_ROOM");
-                    dos.flush();
-                    currentRoom = null;
-                    chatArea.append("Has abandonado la sala\n");
+                    send("FILE:" + selectedFile.getName() + ":0");
+                    sendFile(selectedFile.getAbsolutePath());
                 } catch (IOException ex) {
-                    chatArea.append("Error al salir de la sala: " + ex.getMessage() + "\n");
+                    showError("Error al envíar archivo: " + ex.getMessage());
                 }
             }
         });
+        commandPanel.add(sendFileButton);
+        
+        JButton downloadButton = new JButton("Descargar archivo");
+        downloadButton.addActionListener(e -> {
+            String fileName = JOptionPane.showInputDialog(frame, "Ingresa el nombre de archivo a descargar:");
+            if (fileName != null && !fileName.trim().isEmpty()) {
+                new Thread(() -> {
+                    try {
+                        chatArea.append("Iniciando descarga: " + fileName + "\n");
+                        receiveFile(fileName.trim());
+                    } catch (IOException ex) {
+                        showError("Descarga fallida: " + ex.getMessage());
+                    }
+                }).start();
+            }
+        });
+        commandPanel.add(downloadButton);
+        
+        bottomPanel.add(commandPanel, BorderLayout.NORTH);
+
+        frame.add(bottomPanel, BorderLayout.SOUTH);
 
         frame.setVisible(true);
     }
 
-    private static void receiveMessages() {
-        try {
-            while (true) {
-                String message = dis.readUTF();
-                String[] parts = message.split(":", 4);
-                
-                switch (parts[0]) {
-                    case "ROOM":
-                        chatArea.append("[" + parts[1] + "] " + parts[2] + ": " + parts[3] + "\n");
-                        break;
-                    case "PRIVATE":
-                        chatArea.append("[PRIVADO de " + parts[1] + "]: " + parts[2] + "\n");
-                        break;
-                    case "JOINED_ROOM":
-                        currentRoom = parts[1];
-                        chatArea.append("Te has unido a la sala: " + parts[1] + "\n");
-                        break;
-                    case "LEFT_ROOM":
-                        chatArea.append("Has abandonado la sala: " + parts[1] + "\n");
-                        currentRoom = null;
-                        break;
-                    case "USER_LIST":
-                        updateUserList(parts[1].split(","));
-                        break;
-                    case "ROOM_LIST":
-                        updateRoomList(parts[1].split(","));
-                        break;
-                    case "FILE_ROOM":
-                        receiveFileNotification(parts[1], parts[2], parts[3], Long.parseLong(parts[4]));
-                        break;
-                    case "FILE_PRIVATE":
-                        receiveFileNotification(null, parts[1], parts[2], Long.parseLong(parts[3]));
-                        break;
+    private void sendMessage() {
+        String text = inputField.getText().trim();
+        if (!text.isEmpty()) {
+            try {
+                if (text.startsWith("/")) {
+                    handle(text);
+                } else {
+                    // Asegurarse de que currentRoom no sea nulo/vacío,
+                    // pero no forzar un JOIN_ROOM aquí
+                    if (currentRoom == null || currentRoom.isEmpty()) {
+                        // Este escenario idealmente no debería ocurrir si la gestión de la sala
+                        // es correcta. Si ocurre, indica un problema más profundo con currentRoom no siendo configurado.
+                        // Por ahora, podrías registrar un error o evitar el envío de un mensaje.
+                        showError("No se puede enviar mensaje: no estas en una sala.");
+                        return;
+                    }
+                    send("MSG_ROOM:" + currentRoom + ":" + username + ":" + text);
                 }
+                inputField.setText("");
+            } catch (IOException e) {
+                showError("Error al enviar mensaje: " + e.getMessage());
             }
-        } catch (IOException e) {
-            chatArea.append("Desconectado del servidor\n");
-            disconnect();
         }
     }
 
-    private static void updateUserList(String[] users) {
-        SwingUtilities.invokeLater(() -> {
-            userListModel.clear();
-            recipientCombo.removeAllItems();
-            recipientCombo.addItem("Todos en la sala");
-            
-            for (String user : users) {
-                if (!user.equals(username) && !user.isEmpty()) {
-                    userListModel.addElement(user);
-                    recipientCombo.addItem(user);
-                }
+    public void start() throws Exception {
+        new Thread(() -> {
+            try {
+                listenMulticast();
+            } catch (IOException e) {
+                showError("Multicast error: " + e.getMessage());
             }
-        });
+        }).start();
+
+        new Thread(() -> {
+            try {
+                listenUnicast();
+            } catch (IOException e) {
+                showError("Unicast error: " + e.getMessage());
+            }
+        }).start();
+
+        send("JOIN:" + username);
     }
 
-    private static void updateRoomList(String[] rooms) {
-        SwingUtilities.invokeLater(() -> {
-            roomListModel.clear();
-            for (String room : rooms) {
-                if (!room.isEmpty()) {
-                    roomListModel.addElement(room);
+    private void listenMulticast() throws IOException {
+        byte[] buf = new byte[BUFFER_SIZE];
+        while (true) {
+            DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+            mcastSocket.receive(pkt);
+            String msg = new String(pkt.getData(), 0, pkt.getLength(), StandardCharsets.UTF_8);
+
+            SwingUtilities.invokeLater(() -> {
+                // Modificar el método listenMulticast():
+                if (msg.startsWith("ROOMS:")) {
+                    String roomsStr = msg.substring(6);
+                    if (!roomsStr.isEmpty()) {
+                        String[] rooms = roomsStr.split(",");
+                        roomListModel.clear();
+                        for (String room : rooms) {
+                            // Extraer solo el nombre base de la sala (eliminar conteo de usuarios)
+                            String cleanRoomName = room.split("\\s+")[0].trim();
+                            if (!cleanRoomName.isEmpty()) {
+                                roomListModel.addElement(cleanRoomName);
+                            }
+                        }
+                    }
+                } else if (msg.startsWith("USERS:")) {
+                    String[] users = msg.substring(6).split(",");
+                    userListModel.clear();
+                    for (String user : users) {
+                        userListModel.addElement(user);
+                    }
+                } else if (msg.startsWith("ROOM_CREATED:")) {
+                    chatArea.append("Nueva sala creada: " + msg.substring(13) + "\n");
+                } else if (msg.startsWith("JOINED_ROOM:")) {
+                    String newRoom = msg.substring(12);
+                    if (!newRoom.equals(currentRoom)) {
+                        currentRoom = newRoom;
+                        chatArea.setText("");
+                        frame.setTitle("Chat Cliente - " + username + " (" + currentRoom + ") [" + SERVER_ADDR + "]");
+                        chatArea.append("=== Te has unido a: " + currentRoom + " ===\n");
+
+                        try {
+                            send("GET_HISTORY:" + currentRoom);
+                            send("GET_USERS:" + currentRoom);
+                        } catch (IOException ex) {
+                            showError("Error al obtener datos de la sala: " + ex.getMessage());
+                        }
+                    }
                 }
-            }
-        });
+                else if (msg.startsWith("LEFT_ROOM:")) {
+                    String leftRoom = msg.substring(10);
+                    chatArea.append("Has salido de: " + leftRoom + "\n");
+
+                    if (leftRoom.equals(currentRoom)) {
+                        if (currentRoom.equals("lobby")) {
+                            chatArea.append("Has abandonado el lobby\n");
+                        } else {
+                            currentRoom = "lobby";
+                            frame.setTitle("Chat Cliente - " + username + " (" + currentRoom + ") [" + SERVER_ADDR + "]");
+                            chatArea.append("Has vuelto al lobby\n");
+                        }
+                    }
+                } else if (msg.startsWith("HISTORY:")) {
+                    String[] parts = msg.split(":", 3);
+                    if (parts.length == 3 && parts[1].equals(currentRoom)) {
+                        chatArea.append(parts[2] + "\n");
+                    }
+                } else if (msg.startsWith("File available:")) {
+                    String fileName = msg.substring(15).trim();
+                    int option = JOptionPane.showConfirmDialog(frame, 
+                        "Download file: " + fileName + "?", 
+                        "File Available", 
+                        JOptionPane.YES_NO_OPTION);
+                    if (option == JOptionPane.YES_OPTION) {
+                        new Thread(() -> {
+                            try {
+                                receiveFile(fileName);
+                            } catch (IOException ex) {
+                                showError("Download failed: " + ex.getMessage());
+                            }
+                        }).start();
+                    }
+                } else {
+                    chatArea.append(msg + "\n");
+                }
+                chatArea.setCaretPosition(chatArea.getDocument().getLength());
+            });
+        }
     }
 
-    private static void sendMessage() {
-        String message = messageField.getText().trim();
-        if (message.isEmpty() || currentRoom == null) return;
-        
-        String recipient = (String) recipientCombo.getSelectedItem();
-        
-        try {
-            if (recipient.equals("Todos en la sala")) {
-                dos.writeUTF("ROOM_MSG");
-                dos.writeUTF(currentRoom);
-                dos.writeUTF(message);
-                chatArea.append("[Tú en " + currentRoom + "]: " + message + "\n");
+    private void listenUnicast() throws IOException {
+        byte[] buf = new byte[BUFFER_SIZE];
+        while (true) {
+            DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+            unicastSocket.receive(pkt);
+            String msg = new String(pkt.getData(), 0, pkt.getLength(), StandardCharsets.UTF_8);
+            SwingUtilities.invokeLater(() -> {
+                if (msg.startsWith("[PRIVATE]")) {
+                    chatArea.setForeground(Color.BLUE);
+                    chatArea.append(msg + "\n");
+                    chatArea.setForeground(Color.BLACK);
+                    Toolkit.getDefaultToolkit().beep();
+                } else if (msg.startsWith("[ERROR]")) {
+                    chatArea.setForeground(Color.RED);
+                    chatArea.append(msg + "\n");
+                    chatArea.setForeground(Color.BLACK);
+                } else {
+                    chatArea.append(msg + "\n");
+                }
+                chatArea.setCaretPosition(chatArea.getDocument().getLength());
+            });
+        }
+    }
+
+    private void handle(String in) throws IOException {
+        if (in.startsWith("/create ")) {
+            send("CREATE_ROOM:" + in.substring(8));
+            updateLists();
+        } else if (in.equals("/rooms")) {
+            send("LIST_ROOMS");
+            updateLists();
+        } else if (in.startsWith("/join ")) {
+            String roomToJoin = in.substring(6).trim(); // Recortar para eliminar espacios en blanco
+            if (!roomToJoin.isEmpty() && !roomToJoin.equals(currentRoom)) {
+                try {
+                    send("JOIN_ROOM:" + roomToJoin + ":" + username);
+                    // Actualizar la currentRoom del cliente inmediatamente después de enviar la solicitud de unión
+                    // El servidor confirmará la unión, pero el cliente puede actualizar de forma optimista
+                    currentRoom = roomToJoin;
+                    SwingUtilities.invokeLater(() -> {
+                        frame.setTitle("Chat Cliente - " + username + " (" + currentRoom + ") [" + SERVER_ADDR + "]");
+                        chatArea.append("=== Intentando unirse a: " + currentRoom + " ===\n");
+                    });
+                } catch (IOException ex) {
+                    showError("Error al unirse a sala: " + ex.getMessage());
+                }
+            } else if (roomToJoin.isEmpty()) {
+                showError("Nombre de sala no puede estar vacío.");
+            }
+        } else if (in.startsWith("/exit ")) {
+            send("LEAVE_ROOM:" + in.substring(6));
+            updateLists();
+        } else if (in.startsWith("/msg ")) {
+            String[] p = in.split(" ", 3);
+            if (p.length < 3) {
+                showError("Usage: /msg <user> <text>");
             } else {
-                dos.writeUTF("PRIVATE_MSG");
-                dos.writeUTF(recipient);
-                dos.writeUTF(message);
-                chatArea.append("[Privado a " + recipient + "]: " + message + "\n");
+                send("PRIVATE:" + username + ":" + p[1] + ":" + p[2]);
             }
-            dos.flush();
-            messageField.setText("");
-        } catch (IOException e) {
-            chatArea.append("Error al enviar mensaje: " + e.getMessage() + "\n");
+        } else if (in.startsWith("/file ")) {
+            String fn = in.substring(6);
+            send("FILE:" + fn + ":0");
+            sendFile(fn);
+        } else if (in.equals("/leave")) {
+            send("LEAVE:" + username);
+            System.exit(0);
+        } else {
+            send("MSG_ROOM:" + currentRoom + ":" + username + ":" + in);
         }
     }
 
-    private static void sendFile() {
-        if (currentRoom == null) {
-            JOptionPane.showMessageDialog(null, "Únete a una sala primero", "Error", JOptionPane.ERROR_MESSAGE);
+    private void send(String msg) throws IOException {
+        byte[] b = msg.getBytes(StandardCharsets.UTF_8);
+        DatagramPacket p = new DatagramPacket(b, b.length, serverAddress, SERVER_PORT);
+        unicastSocket.send(p);
+    }
+
+    private void sendFile(String fileName) throws IOException {
+        File f = new File(fileName);
+        if (!f.exists()) {
+            showError("El archivo no existe");
             return;
         }
+        FileInputStream fis = new FileInputStream(f);
+        byte[] buf = new byte[BUFFER_SIZE - 4];
+        int seq = 0, len;
+        while ((len = fis.read(buf)) != -1) {
+            byte[] pkt = new byte[len + 4];
+            pkt[0] = (byte)(seq >> 24);
+            pkt[1] = (byte)(seq >> 16);
+            pkt[2] = (byte)(seq >> 8);
+            pkt[3] = (byte)(seq);
+            System.arraycopy(buf, 0, pkt, 4, len);
+            DatagramPacket p = new DatagramPacket(pkt, pkt.length, serverAddress, SERVER_PORTU);
+            unicastSocket.send(p);
+            seq++;
+        }
+        fis.close();
+        chatArea.append("File sent: " + f.getName() + "\n");
+    }
 
+    private void receiveFile(String fileName) throws IOException {
         JFileChooser fileChooser = new JFileChooser();
-        if (fileChooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            String recipient = (String) recipientCombo.getSelectedItem();
-
-            try {
-                if (recipient.equals("Todos en la sala")) {
-                    dos.writeUTF("FILE_ROOM");
-                    dos.writeUTF(currentRoom);
-                    dos.writeUTF(file.getName());
-                    dos.writeLong(file.length());
-                } else {
-                    dos.writeUTF("FILE_PRIVATE");
-                    dos.writeUTF(recipient);
-                    dos.writeUTF(file.getName());
-                    dos.writeLong(file.length());
-                }
-
-                // Enviar el archivo
-                FileInputStream fis = new FileInputStream(file);
-                byte[] buffer = new byte[4096];
-                int read;
-                
-                while ((read = fis.read(buffer)) != -1) {
-                    dos.write(buffer, 0, read);
-                }
-                
-                fis.close();
-                chatArea.append("Archivo enviado: " + file.getName() + "\n");
-            } catch (IOException e) {
-                chatArea.append("Error al enviar archivo: " + e.getMessage() + "\n");
-            }
-        }
-    }
-
-    private static void receiveFileNotification(String room, String sender, String filename, long size) {
-        int option = JOptionPane.showConfirmDialog(null, 
-            (room != null ? "[" + room + "] " : "[Privado] ") + sender + " quiere enviarte el archivo " + 
-            filename + " (" + size + " bytes). ¿Aceptar?", 
-            "Recibir archivo", JOptionPane.YES_NO_OPTION);
+        fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fileChooser.setDialogTitle("Seleccionar carpeta para guardar archivo");
+        fileChooser.setCurrentDirectory(new File("./" + username + "_downloads"));
         
-        if (option == JOptionPane.YES_OPTION) {
-            JFileChooser fileChooser = new JFileChooser();
-            fileChooser.setSelectedFile(new File(filename));
-            if (fileChooser.showSaveDialog(null) == JFileChooser.APPROVE_OPTION) {
-                try {
-                    File file = fileChooser.getSelectedFile();
-                    FileOutputStream fos = new FileOutputStream(file);
-                    
-                    long received = 0;
-                    byte[] buffer = new byte[4096];
-                    int read;
-                    
-                    while (received < size && (read = dis.read(buffer, 0, (int) Math.min(buffer.length, size - received))) != -1) {
-                        fos.write(buffer, 0, read);
-                        received += read;
+        if (fileChooser.showSaveDialog(frame) == JFileChooser.APPROVE_OPTION) {
+            File dir = fileChooser.getSelectedFile();
+            if (!dir.exists()) dir.mkdirs();
+
+            FileOutputStream fos = new FileOutputStream(new File(dir, fileName));
+            byte[] buf = new byte[BUFFER_SIZE];
+            int expectedSeq = 0;
+            boolean fileComplete = false;
+
+            while (!fileComplete) {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                unicastSocket.receive(p);
+
+                String header = new String(p.getData(), 0, Math.min(p.getLength(), 20), StandardCharsets.UTF_8);
+                if (header.startsWith("FILE_EOF:")) {
+                    fileComplete = true;
+                    String receivedFileName = header.substring(9).trim();
+                    if (receivedFileName.equals(fileName)) {
+                        SwingUtilities.invokeLater(() -> {
+                            chatArea.append("Descarga de archivo completada: " + fileName + "\n");
+                        });
                     }
-                    
-                    fos.close();
-                    chatArea.append("Archivo recibido: " + filename + "\n");
-                } catch (IOException e) {
-                    chatArea.append("Error al recibir archivo: " + e.getMessage() + "\n");
+                    break;
+                }
+
+                int seq = byteArrayToInt(p.getData(), 0);
+                if (seq == expectedSeq) {
+                    fos.write(p.getData(), 4, p.getLength() - 4);
+                    expectedSeq++;
+
+                    String ack = "ACK:" + seq;
+                    byte[] ackBytes = ack.getBytes(StandardCharsets.UTF_8);
+                    DatagramPacket ackPacket = new DatagramPacket(
+                        ackBytes, ackBytes.length, 
+                        serverAddress, SERVER_PORTU);
+                    unicastSocket.send(ackPacket);
                 }
             }
-        } else {
-            try {
-                // Descartar el archivo si el usuario no lo quiere
-                long skipped = 0;
-                byte[] buffer = new byte[4096];
-                while (skipped < size) {
-                    skipped += dis.read(buffer, 0, (int) Math.min(buffer.length, size - skipped));
-                }
-            } catch (IOException e) {
-                chatArea.append("Error al descartar archivo: " + e.getMessage() + "\n");
-            }
+            fos.close();
         }
     }
 
-    private static void disconnect() {
+    private int byteArrayToInt(byte[] arr, int off) {
+        return ((arr[off]&0xFF)<<24) |
+                ((arr[off+1]&0xFF)<<16) |
+                ((arr[off+2]&0xFF)<<8) |
+                (arr[off+3]&0xFF);
+    }
+    
+    private void requestRoomList() {
         try {
-            if (socket != null) socket.close();
-        } catch (IOException e) {
-            // Ignorar
+            send("LIST_ROOMS");
+        } catch (IOException ex) {
+            showError("Error requesting room list: " + ex.getMessage());
         }
-        
-        JFrame frame = (JFrame) SwingUtilities.getWindowAncestor(chatArea);
-        frame.getContentPane().getComponent(0).getComponent(6).setEnabled(true); // connectButton
-        frame.getContentPane().getComponent(0).getComponent(7).setEnabled(false); // disconnectButton
-        usernameField.setEnabled(true);
-        chatArea.append("Desconectado del servidor\n");
+    }
+    
+    private void updateLists() {
+        SwingUtilities.invokeLater(() -> {
+            userListModel.clear();
+            for (String user : userList) {
+                userListModel.addElement(user);
+            }
+
+            roomListModel.clear();
+            for (String room : chatRooms.keySet()) {
+                roomListModel.addElement(room + " (" + chatRooms.get(room).size() + " usuarios)");
+            }
+        });
+    }
+    
+    // Añadir este método nuevo:
+    private void validateRoomMembership() {
+        try {
+            send("CHECK_ROOM:" + currentRoom + ":" + username);
+        } catch (IOException ex) {
+            showError("Error al verificar membresía de sala: " + ex.getMessage());
+        }
+    }
+
+    private void showError(String message) {
+        SwingUtilities.invokeLater(() -> {
+            JOptionPane.showMessageDialog(frame, message, "Error", JOptionPane.ERROR_MESSAGE);
+        });
     }
 }
