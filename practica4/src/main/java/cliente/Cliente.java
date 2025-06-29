@@ -7,36 +7,47 @@ import java.awt.*;
 import java.awt.event.*;
 import javax.swing.tree.*;
 import javax.swing.event.*;
+import java.util.concurrent.*;
 
 public class Cliente {
 
     // Componentes de la interfaz gráfica y variables de estado
-    private static JTextArea statusArea;                    // Área de texto para mostrar el estado del servidor
-    private static File selectedFile;                       // Archivo seleccionado para enviar
-    private static DefaultMutableTreeNode rootNode;         // Nodo raíz para el árbol de archivos
-    private static JTree fileTree;                          // Componente JTree para mostrar la estructura de archivos
-    private static DefaultTreeModel treeModel;              // Nodo raíz para el árbol de archivos
-    private static String currentRootPath;                  // Ruta donde se almacenarán los archivos recibidos
-    private static ServerSocket receptionSocket;            // Socket del servidor para aceptar conexiones
-    private static final int RECEPTION_PORT = 8001;         // Puerto de recepcion
+    private static JTextArea statusArea;
+    private static File selectedFile;
+    private static DefaultMutableTreeNode rootNode;
+    private static JTree fileTree;
+    private static DefaultTreeModel treeModel;
+    private static String currentRootPath;
+    private static ServerSocket receptionSocket;
+    //private static final int RECEPTION_PORT = 8001;
+    private static int receptionPort;
+    private static ExecutorService receptionThreadPool;
+    private static final int MAX_RECEPTIONS = 5;
 
     public static void main(String[] args) {
+        // Configurar alberca de hilos
+        receptionThreadPool = Executors.newFixedThreadPool(MAX_RECEPTIONS);
+
         // Configuración de la ventana principal
         JFrame frame = new JFrame("Cliente de Archivos");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(700, 600);
+        frame.setSize(1000, 600);
         frame.setLayout(new BorderLayout());
 
         // Panel superior para configuración del servidor
         JPanel serverPanel = new JPanel(new FlowLayout());
         JLabel serverLabel = new JLabel("Servidor:");
-        JTextField serverField = new JTextField("127.0.0.1", 15);   // Campo para la IP del servidor
-        JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8000", 5);           // Campo para el puerto de conexion
+        JTextField serverField = new JTextField("127.0.0.1", 15);
+        JLabel portLabel = new JLabel("Puerto Servidor:");
+        JTextField portField = new JTextField("8000", 5);
+        JLabel clientReceptionPortLabel = new JLabel("Puerto Cliente (Recepción):");
+        JTextField clientReceptionPortField = new JTextField("8002", 5);
         serverPanel.add(serverLabel);
         serverPanel.add(serverField);
         serverPanel.add(portLabel);
         serverPanel.add(portField);
+        serverPanel.add(clientReceptionPortLabel);
+        serverPanel.add(clientReceptionPortField); 
 
         JSplitPane mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
         JSplitPane fileSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
@@ -67,7 +78,7 @@ public class Cliente {
 
         fileSplitPane.setLeftComponent(treeScroll);
         fileSplitPane.setRightComponent(infoPanel);
-        fileSplitPane.setDividerLocation(400);
+        fileSplitPane.setDividerLocation(700);
 
         // Configuración del área de estado
         statusArea = new JTextArea();
@@ -80,6 +91,9 @@ public class Cliente {
 
         JButton loadFsButton = new JButton("Cargar Sistema de Archivos");
         serverPanel.add(loadFsButton);
+        
+        JButton startClientReceptionButton = new JButton("Iniciar Recepción Cliente");
+        serverPanel.add(startClientReceptionButton);
 
         frame.add(serverPanel, BorderLayout.NORTH);
         frame.add(mainSplitPane, BorderLayout.CENTER);
@@ -201,7 +215,6 @@ public class Cliente {
             }
         });
 
-        // Listener para el botón de renombrar
         renameButton.addActionListener(e -> {
             DefaultMutableTreeNode selectedNode = (DefaultMutableTreeNode) fileTree.getLastSelectedPathComponent();
             if (selectedNode == null || selectedNode == rootNode) {
@@ -231,14 +244,14 @@ public class Cliente {
                 return;
             }
 
-            new Thread(() -> {
+            receptionThreadPool.execute(() -> { 
                 try {
-                    String dir = serverField.getText();                 // IP del puerto
-                    int pto = Integer.parseInt(portField.getText());    // IP del servidor
+                    String dir = serverField.getText();
+                    int pto = Integer.parseInt(portField.getText());
 
-                    if (pto == RECEPTION_PORT) {
+                    if (pto == receptionPort) { // Usar la variable dinámica
                         SwingUtilities.invokeLater(() -> {
-                            statusArea.append("Error: No se puede enviar al puerto de recepción\n");
+                            statusArea.append("Error: No se puede enviar al puerto de recepción del propio cliente.\n");
                         });
                         return;
                     }
@@ -294,65 +307,126 @@ public class Cliente {
                     });
                     ex.printStackTrace();
                 }
-            }).start();
+            });
+        });
+        
+        // Listener para el nuevo botón "Iniciar Recepción Cliente"
+        startClientReceptionButton.addActionListener(e -> {
+            try {
+                receptionPort = Integer.parseInt(clientReceptionPortField.getText());
+                startFileReception();
+            } catch (NumberFormatException ex) {
+                JOptionPane.showMessageDialog(frame, "Por favor, ingrese un número de puerto válido.", "Error de Puerto", JOptionPane.ERROR_MESSAGE);
+            }
         });
 
         // Iniciar recepción de archivos
-        startFileReception();
+        //startFileReception();
         frame.setVisible(true);
     }
 
     private static void startFileReception() {
-        new Thread(() -> {
+        // Asegúrate de que el puerto no esté ya siendo usado por una instancia previa
+        if (receptionSocket != null && !receptionSocket.isClosed()) {
+            updateStatus("La recepción de archivos ya está activa en el puerto " + receptionPort + "\n");
+            return;
+        }
+
+        receptionThreadPool.execute(() -> {
             try {
-                receptionSocket = new ServerSocket(RECEPTION_PORT);
-                statusArea.append("Cliente listo para recibir archivos en puerto " + RECEPTION_PORT + "\n");
-                
-                while (true) {
+                receptionSocket = new ServerSocket(receptionPort); // Usar el puerto dinámico
+                updateStatus("Cliente listo para recibir archivos (puerto " + receptionPort + ")\n");
+                updateStatus("Máximo de transferencias simultáneas: " + MAX_RECEPTIONS + "\n");
+
+                while (!Thread.currentThread().isInterrupted()) {
                     Socket connection = receptionSocket.accept();
-                    statusArea.append("Conexión entrante para recibir archivo\n");
-                    
-                    DataInputStream dis = new DataInputStream(connection.getInputStream());
-                    String nombre = dis.readUTF();
-                    long tam = dis.readLong();
-                    
-                    nombre = nombre.replace("..", "").replace("/", "").replace("\\", "");
-                    
-                    File receivedFile = new File(currentRootPath, nombre);
-                    DataOutputStream dos = new DataOutputStream(new FileOutputStream(receivedFile));
-                    
-                    final String nomfinal = nombre;
-                    
-                    long recibidos = 0;
-                    int l;
-                    while (recibidos < tam) {
-                        byte[] b = new byte[3500];
-                        l = dis.read(b);
-                        dos.write(b, 0, l);
-                        dos.flush();
-                        recibidos += l;
-                        final int porcentaje = (int) ((recibidos * 100) / tam);
-                        
-                        SwingUtilities.invokeLater(() -> {
-                            statusArea.append("\rRecibiendo: " + porcentaje + "%");
-                        });
-                    }
-                    
-                    SwingUtilities.invokeLater(() -> {
-                        statusArea.append("\nArchivo recibido: " + nomfinal + "\n");
-                        updateFileTree();
-                    });
-                    
-                    dos.close();
-                    dis.close();
-                    connection.close();
+                    updateStatus("Conexión entrante desde: " +
+                            connection.getInetAddress() + "\n");
+
+                    receptionThreadPool.execute(() -> handleFileReception(connection));
                 }
-            } catch (Exception e) {
-                SwingUtilities.invokeLater(() -> {
-                    statusArea.append("Error en recepción: " + e.getMessage() + "\n");
+            } catch (BindException e) { // Capturar específicamente BindException
+                 SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(null, "El puerto " + receptionPort + " ya está en uso. Por favor, elija otro puerto para este cliente.", "Error de Puerto", JOptionPane.ERROR_MESSAGE);
+                    statusArea.append("Error: El puerto " + receptionPort + " ya está en uso. " + e.getMessage() + "\n");
                 });
             }
-        }).start();
+            catch (IOException e) {
+                if (receptionSocket != null && !receptionSocket.isClosed()) { // Verificar si no es nulo antes de llamar
+                    updateStatus("Error en recepción: " + e.getMessage() + "\n");
+                } else if (e instanceof SocketException && e.getMessage().contains("Socket closed")) {
+                     updateStatus("Recepción de archivos detenida.\n");
+                }
+                else {
+                    updateStatus("Error al iniciar/detener recepción (receptionSocket es nulo): " + e.getMessage() + "\n");
+                }
+            } finally {
+                shutdownReception();
+            }
+        });
+    }
+
+    private static void handleFileReception(Socket connection) {
+        try {
+            DataInputStream dis = new DataInputStream(connection.getInputStream());
+            String nombre = dis.readUTF();
+            long tam = dis.readLong();
+
+            nombre = sanitizeFilename(nombre);
+
+            if (currentRootPath == null) {
+                updateStatus("Error: No se ha seleccionado directorio de destino\n");
+                return;
+            }
+
+            File receivedFile = new File(currentRootPath, nombre);
+            DataOutputStream dos = new DataOutputStream(new FileOutputStream(receivedFile));
+
+            long recibidos = 0;
+            byte[] buffer = new byte[3500];
+            int bytesRead;
+            
+            while (recibidos < tam && (bytesRead = dis.read(buffer)) != -1) {
+                dos.write(buffer, 0, bytesRead);
+                recibidos += bytesRead;
+                final int progress = (int) ((recibidos * 100) / tam);
+                updateStatus("\rRecibiendo: " + progress + "%");
+            }
+
+            updateStatus("\nArchivo recibido: " + nombre + "\n");
+            SwingUtilities.invokeLater(() -> updateFileTree());
+
+            dos.close();
+            dis.close();
+        } catch (Exception e) {
+            updateStatus("Error al recibir archivo: " + e.getMessage() + "\n");
+        } finally {
+            try {
+                connection.close();
+            } catch (IOException e) {
+                // Ignorar error al cerrar
+            }
+        }
+    }
+
+    private static void shutdownReception() {
+        try {
+            receptionThreadPool.shutdown();
+            if (!receptionThreadPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                receptionThreadPool.shutdownNow();
+            }
+            updateStatus("Recepción de archivos detenida\n");
+        } catch (InterruptedException e) {
+            receptionThreadPool.shutdownNow();
+        }
+    }
+
+    private static void updateStatus(String message) {
+        SwingUtilities.invokeLater(() -> statusArea.append(message));
+    }
+
+    private static String sanitizeFilename(String filename) {
+        return filename.replace("..", "").replace("/", "").replace("\\", "");
     }
 
     private static boolean deleteDirectory(File directory) {

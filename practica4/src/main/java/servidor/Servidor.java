@@ -8,19 +8,27 @@ import java.awt.event.*;
 import javax.swing.tree.*;
 import javax.swing.event.*;
 import javax.swing.filechooser.*;
+import java.util.concurrent.*;
 
 public class Servidor {
 
     // Componentes de la interfaz gráfica y variables de estado
-    private static JTextArea statusArea;            // Área de texto para mostrar el estado del servidor
-    private static File selectedFile;               // Archivo seleccionado para enviar
-    private static String ruta_archivos;            // Ruta donde se almacenarán los archivos recibidos
-    private static ServerSocket serverSocket;       // Socket del servidor para aceptar conexiones
-    private static DefaultMutableTreeNode rootNode; // Nodo raíz para el árbol de archivos
-    private static JTree fileTree;                  // Componente JTree para mostrar la estructura de archivos
-    private static DefaultTreeModel treeModel;      // Modelo de datos para el JTree
+    private static JTextArea statusArea;
+    private static File selectedFile;
+    private static String ruta_archivos;
+    private static ServerSocket serverSocket;
+    private static DefaultMutableTreeNode rootNode;
+    private static JTree fileTree;
+    private static DefaultTreeModel treeModel;
+    private static ExecutorService clientThreadPool;
+    private static ExecutorService taskThreadPool;
+    private static final int MAX_CLIENTS = 20;
 
     public static void main(String[] args) {
+        // Configuración de las albercas de hilos
+        clientThreadPool = Executors.newFixedThreadPool(MAX_CLIENTS);
+        taskThreadPool = Executors.newCachedThreadPool();
+
         // Configuración de la ventana principal
         JFrame frame = new JFrame("Servidor de Archivos");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -30,9 +38,9 @@ public class Servidor {
         // Panel superior para configuración del servidor
         JPanel clientPanel = new JPanel(new FlowLayout());
         JLabel clientLabel = new JLabel("Cliente:");
-        JTextField clientField = new JTextField("127.0.0.1", 15);   // Campo para la IP del cliente
+        JTextField clientField = new JTextField("127.0.0.1", 15);
         JLabel portLabel = new JLabel("Puerto:");
-        JTextField portField = new JTextField("8001", 5);           // Campo para el puerto diferente al del servidor
+        JTextField portField = new JTextField("8001", 5);
         clientPanel.add(clientLabel);
         clientPanel.add(clientField);
         clientPanel.add(portLabel);
@@ -91,14 +99,12 @@ public class Servidor {
                 return;
             }
 
-            // Actualiza la información del archivo seleccionado
             Object nodeInfo = node.getUserObject();
             if (nodeInfo instanceof File) {
                 File file = (File) nodeInfo;
                 if (!file.isDirectory()) {
                     selectedFile = file;
-                    fileInfoLabel.setText("Archivo seleccionado: " + file.getName()
-                            + " (" + file.length() + " bytes)");
+                    fileInfoLabel.setText("Archivo seleccionado: " + file.getName() + " (" + file.length() + " bytes)");
                 } else {
                     selectedFile = null;
                     fileInfoLabel.setText("Directorio seleccionado: " + file.getName());
@@ -116,9 +122,9 @@ public class Servidor {
                 if (!ruta_archivos.endsWith(File.separator)) {
                     ruta_archivos += File.separator;
                 }
-                updateFileTree(); // Actualiza el árbol con la nueva ruta
+                updateFileTree();
                 statusArea.append("Carpeta de destino seleccionada: " + ruta_archivos + "\n");
-                startServer(); // Inicia el servidor después de seleccionar la carpeta
+                startServer();
             }
         });
 
@@ -139,7 +145,6 @@ public class Servidor {
                 return;
             }
 
-            // Diálogo para seleccionar tipo de elemento a crear
             String[] options = {"Archivo", "Carpeta", "Cancelar"};
             int choice = JOptionPane.showOptionDialog(frame,
                     "¿Qué desea crear?",
@@ -154,14 +159,12 @@ public class Servidor {
                 return;
             }
 
-            // Solicita nombre para el nuevo elemento
             String name = JOptionPane.showInputDialog(frame,
                     "Ingrese el nombre:");
             if (name == null || name.trim().isEmpty()) {
                 return;
             }
 
-            // Determina el directorio padre donde se creará el elemento
             DefaultMutableTreeNode selectedNode = (DefaultMutableTreeNode) fileTree.getLastSelectedPathComponent();
             File parentDir;
 
@@ -176,7 +179,7 @@ public class Servidor {
 
             try {
                 File newFile = new File(parentDir, name);
-                if (choice == 0) { // Crear archivo
+                if (choice == 0) {
                     if (newFile.createNewFile()) {
                         statusArea.append("Archivo creado: " + newFile.getAbsolutePath() + "\n");
                     } else {
@@ -185,7 +188,7 @@ public class Servidor {
                                 "Error", JOptionPane.ERROR_MESSAGE);
                         return;
                     }
-                } else { // Crear carpeta
+                } else {
                     if (newFile.mkdir()) {
                         statusArea.append("Carpeta creada: " + newFile.getAbsolutePath() + "\n");
                     } else {
@@ -195,7 +198,7 @@ public class Servidor {
                         return;
                     }
                 }
-                updateFileTree(); // Actualiza el árbol después de la creación
+                updateFileTree();
             } catch (IOException ex) {
                 JOptionPane.showMessageDialog(frame,
                         "Error al crear: " + ex.getMessage(),
@@ -214,7 +217,6 @@ public class Servidor {
             }
 
             File fileToDelete = (File) selectedNode.getUserObject();
-            // Evita eliminar el directorio raíz
             if (fileToDelete.getAbsolutePath().equals(ruta_archivos)) {
                 JOptionPane.showMessageDialog(frame,
                         "No se puede eliminar el directorio raíz actual",
@@ -222,7 +224,6 @@ public class Servidor {
                 return;
             }
 
-            // Confirmación antes de eliminar
             int confirm = JOptionPane.showConfirmDialog(frame,
                     "¿Está seguro que desea eliminar " + fileToDelete.getName() + "?",
                     "Confirmar eliminación",
@@ -231,14 +232,14 @@ public class Servidor {
             if (confirm == JOptionPane.YES_OPTION) {
                 boolean success;
                 if (fileToDelete.isDirectory()) {
-                    success = deleteDirectory(fileToDelete); // Elimina directorio recursivamente
+                    success = deleteDirectory(fileToDelete);
                 } else {
-                    success = fileToDelete.delete(); // Elimina archivo
+                    success = fileToDelete.delete();
                 }
 
                 if (success) {
                     statusArea.append("Eliminado: " + fileToDelete.getAbsolutePath() + "\n");
-                    updateFileTree(); // Actualiza el árbol después de eliminar
+                    updateFileTree();
                 } else {
                     JOptionPane.showMessageDialog(frame,
                             "No se pudo eliminar. ¿Está en uso?",
@@ -258,7 +259,6 @@ public class Servidor {
             }
 
             File fileToRename = (File) selectedNode.getUserObject();
-            // Solicita nuevo nombre
             String newName = JOptionPane.showInputDialog(frame,
                     "Nuevo nombre:",
                     fileToRename.getName());
@@ -267,11 +267,10 @@ public class Servidor {
                 return;
             }
 
-            // Intenta renombrar el archivo/directorio
             File newFile = new File(fileToRename.getParentFile(), newName);
             if (fileToRename.renameTo(newFile)) {
                 statusArea.append("Renombrado: " + fileToRename.getName() + " → " + newName + "\n");
-                updateFileTree(); // Actualiza el árbol después de renombrar
+                updateFileTree();
             } else {
                 JOptionPane.showMessageDialog(frame,
                         "No se pudo renombrar. ¿El nuevo nombre ya existe?",
@@ -288,33 +287,28 @@ public class Servidor {
                 return;
             }
 
-            // Envía el archivo en un hilo separado para no bloquear la interfaz
-            new Thread(() -> {
+            taskThreadPool.execute(() -> {
                 try {
-                    String dir = clientField.getText(); // Obtiene dirección del cliente
-                    int pto = Integer.parseInt(portField.getText()); // Obtiene puerto
+                    String dir = clientField.getText();
+                    int pto = Integer.parseInt(portField.getText());
 
-                    // Muestra estado de conexión
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("Conectando al cliente " + dir + ":" + pto + "...\n");
                     });
 
-                    Socket cl = new Socket(dir, pto); // Establece conexión
+                    Socket cl = new Socket(dir, pto);
 
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("Conexión establecida. Enviando archivo...\n");
                     });
 
-                    // Prepara información del archivo
                     String nombre = selectedFile.getName();
                     String path = selectedFile.getAbsolutePath();
                     long tam = selectedFile.length();
 
-                    // Flujos para enviar datos
                     DataOutputStream dos = new DataOutputStream(cl.getOutputStream());
                     DataInputStream dis = new DataInputStream(new FileInputStream(path));
 
-                    // Envía metadatos (nombre y tamaño)
                     dos.writeUTF(nombre);
                     dos.flush();
                     dos.writeLong(tam);
@@ -322,27 +316,23 @@ public class Servidor {
 
                     long enviados = 0;
                     int l = 0;
-
-                    // Envía el archivo en bloques
+                    byte[] b = new byte[3500];
                     while (enviados < tam) {
-                        byte[] b = new byte[3500];
                         l = dis.read(b);
-                        if (l == -1) break; // fin de archivo
+                        if (l == -1) break;
                         dos.write(b, 0, l);
                         dos.flush();
                         enviados += l;
                         final int porcentaje = (int) ((enviados * 100) / tam);
 
-                        // Actualiza progreso
                         SwingUtilities.invokeLater(() -> {
                             statusArea.append("\rProgreso: " + porcentaje + "%");
                         });
                     }
 
-                    // Finalización del envío
                     SwingUtilities.invokeLater(() -> {
                         statusArea.append("\nArchivo enviado con éxito!\n");
-                        updateFileTree(); // Actualiza el árbol (por si hubo cambios)
+                        updateFileTree();
                     });
 
                     dis.close();
@@ -354,47 +344,147 @@ public class Servidor {
                     });
                     ex.printStackTrace();
                 }
-            }).start();
+            });
         });
 
-        frame.setVisible(true); // Muestra la ventana
+        frame.setVisible(true);
     }
 
-    // Método auxiliar para eliminar directorios recursivamente
+    private static void startServer() {
+        taskThreadPool.execute(() -> {
+            try {
+                int pto = 8000;
+                serverSocket = new ServerSocket(pto);
+                serverSocket.setReuseAddress(true);
+
+                File f2 = new File(ruta_archivos);
+                if (!f2.exists()) {
+                    f2.mkdirs();
+                    statusArea.append("Carpeta creada: " + ruta_archivos + "\n");
+                }
+                f2.setWritable(true);
+
+                statusArea.append("Servidor iniciado en puerto " + pto + "\n");
+                statusArea.append("Máximo de clientes simultáneos: " + MAX_CLIENTS + "\n");
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    Socket clientSocket = serverSocket.accept();
+                    statusArea.append("Nuevo cliente conectado: " + 
+                            clientSocket.getInetAddress() + "\n");
+
+                    clientThreadPool.execute(() -> handleClient(clientSocket));
+                }
+            } catch (IOException e) {
+                if (!serverSocket.isClosed()) {
+                    statusArea.append("Error en servidor: " + e.getMessage() + "\n");
+                }
+            } finally {
+                shutdownServer();
+            }
+        });
+    }
+
+    private static void handleClient(Socket clientSocket) {
+        try {
+            DataInputStream dis = new DataInputStream(clientSocket.getInputStream());
+            String nombre = dis.readUTF();
+            long tam = dis.readLong();
+
+            nombre = sanitizeFilename(nombre);
+
+            updateStatus("Recibiendo archivo: " + nombre + " (" + tam + " bytes)");
+
+            File receivedFile = new File(ruta_archivos + nombre);
+            DataOutputStream dos = new DataOutputStream(new FileOutputStream(receivedFile));
+
+            long recibidos = 0;
+            byte[] buffer = new byte[3500];
+            int bytesRead;
+            
+            while (recibidos < tam && (bytesRead = dis.read(buffer)) != -1) {
+                dos.write(buffer, 0, bytesRead);
+                recibidos += bytesRead;
+                final int progress = (int) ((recibidos * 100) / tam);
+                updateStatus("\rProgreso: " + progress + "%");
+            }
+
+            updateStatus("\nArchivo recibido: " + nombre + "\n");
+            SwingUtilities.invokeLater(() -> updateFileTree());
+
+            dos.close();
+            dis.close();
+        } catch (Exception e) {
+            updateStatus("Error con cliente: " + e.getMessage() + "\n");
+        } finally {
+            try {
+                clientSocket.close();
+            } catch (IOException e) {
+                // Ignorar error al cerrar
+            }
+        }
+    }
+
+    private static String sanitizeFilename(String filename) {
+        return filename.replace("..", "").replace("/", "").replace("\\", "");
+    }
+
+    private static void updateStatus(String message) {
+        SwingUtilities.invokeLater(() -> statusArea.append(message));
+    }
+
+    private static void shutdownServer() {
+        try {
+            clientThreadPool.shutdown();
+            taskThreadPool.shutdown();
+            
+            if (!clientThreadPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                clientThreadPool.shutdownNow();
+            }
+            if (!taskThreadPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                taskThreadPool.shutdownNow();
+            }
+            
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+            
+            updateStatus("Servidor detenido correctamente\n");
+        } catch (Exception e) {
+            updateStatus("Error al detener servidor: " + e.getMessage() + "\n");
+        }
+    }
+
     private static boolean deleteDirectory(File directory) {
         File[] allContents = directory.listFiles();
         if (allContents != null) {
             for (File file : allContents) {
-                deleteDirectory(file); // Elimina recursivamente el contenido
+                deleteDirectory(file);
             }
         }
-        return directory.delete(); // Elimina el directorio vacío
+        return directory.delete();
     }
 
-    // Actualiza el árbol de archivos con el contenido del directorio actual
     private static void updateFileTree() {
-        rootNode.removeAllChildren(); // Limpia el árbol
+        rootNode.removeAllChildren();
         if (ruta_archivos != null && !ruta_archivos.isEmpty()) {
             File rootFile = new File(ruta_archivos);
             DefaultMutableTreeNode root = new DefaultMutableTreeNode(rootFile);
             rootNode.add(root);
-            populateTree(root, rootFile); // Puebla el árbol con el contenido
+            populateTree(root, rootFile);
         }
-        treeModel.reload(); // Recarga el modelo
-        expandAllNodes(fileTree, 0, fileTree.getRowCount()); // Expande todos los nodos
+        treeModel.reload();
+        expandAllNodes(fileTree, 0, fileTree.getRowCount());
     }
 
-    // Expande todos los nodos del árbol recursivamente
     private static void expandAllNodes(JTree tree, int startingIndex, int rowCount) {
         for (int i = startingIndex; i < rowCount; ++i) {
             tree.expandRow(i);
         }
         if (tree.getRowCount() != rowCount) {
-            expandAllNodes(tree, rowCount, tree.getRowCount()); // Expande nodos nuevos
+            expandAllNodes(tree, rowCount, tree.getRowCount());
         }
     }
 
-    // Puebla el árbol con el contenido del directorio
     private static void populateTree(DefaultMutableTreeNode node, File file) {
         if (file.isDirectory()) {
             File[] files = file.listFiles();
@@ -403,98 +493,10 @@ public class Servidor {
                     DefaultMutableTreeNode childNode = new DefaultMutableTreeNode(child);
                     node.add(childNode);
                     if (child.isDirectory()) {
-                        populateTree(childNode, child); // Recursión para subdirectorios
+                        populateTree(childNode, child);
                     }
                 }
             }
-        }
-    }
-
-    // Inicia el servidor en un hilo separado
-    private static void startServer() {
-        new Thread(() -> {
-            try {
-                int pto = 8000; // Puerto del servidor
-                serverSocket = new ServerSocket(pto);
-                serverSocket.setReuseAddress(true);
-
-                // Asegura que el directorio de destino exista
-                File f2 = new File(ruta_archivos);
-                if (!f2.exists()) {
-                    f2.mkdirs();
-                    statusArea.append("Carpeta creada: " + ruta_archivos + "\n");
-                }
-                f2.setWritable(true);
-
-                statusArea.append("Servidor iniciado en el puerto " + pto + "\n");
-
-                // Bucle principal del servidor
-                while (true) {
-                    Socket cl = serverSocket.accept(); // Espera conexiones
-                    statusArea.append("Cliente conectado desde " + cl.getInetAddress() + ":" + cl.getPort() + "\n");
-
-                    // Maneja cada cliente en un hilo separado
-                    final Socket clientSocket = cl;
-                    new Thread(() -> handleClient(clientSocket)).start();
-                }
-            } catch (Exception e) {
-                statusArea.append("Error en el servidor: " + e.getMessage() + "\n");
-                e.printStackTrace();
-            }
-        }).start();
-    }
-
-    // Maneja la conexión con un cliente
-    private static void handleClient(Socket cl) {
-        try {
-            DataInputStream dis = new DataInputStream(cl.getInputStream());
-            // Recibe nombre y tamaño del archivo
-            String nombre = dis.readUTF();
-            long tam = dis.readLong();
-
-            // Limpieza del nombre para seguridad
-            nombre = nombre.replace("..", "").replace("/", "").replace("\\", "");
-
-            // Muestra información en el área de estado
-            final String finalNombre = nombre;
-            SwingUtilities.invokeLater(() -> {
-                statusArea.append("Recibiendo archivo: " + finalNombre + " (" + tam + " bytes)\n");
-            });
-
-            // Prepara para recibir el archivo
-            DataOutputStream dos = new DataOutputStream(new FileOutputStream(ruta_archivos + nombre));
-            long recibidos = 0;
-            int l = 0;
-
-            // Recibe el archivo en bloques
-            while (recibidos < tam) {
-                byte[] b = new byte[3500];
-                l = dis.read(b);
-                dos.write(b, 0, l);
-                dos.flush();
-                recibidos += l;
-                final int porcentaje = (int) ((recibidos * 100) / tam);
-
-                // Actualiza el progreso
-                SwingUtilities.invokeLater(() -> {
-                    statusArea.append("\rProgreso: " + porcentaje + "%");
-                });
-            }
-
-            // Finalización de la recepción
-            SwingUtilities.invokeLater(() -> {
-                statusArea.append("\nArchivo recibido: " + finalNombre + "\n");
-                updateFileTree(); // Actualiza el árbol con el nuevo archivo
-            });
-
-            dos.close();
-            dis.close();
-            cl.close();
-        } catch (Exception e) {
-            SwingUtilities.invokeLater(() -> {
-                statusArea.append("Error al manejar cliente: " + e.getMessage() + "\n");
-            });
-            e.printStackTrace();
         }
     }
 }
