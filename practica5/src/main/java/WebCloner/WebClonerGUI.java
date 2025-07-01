@@ -3,20 +3,26 @@ package WebCloner;
 import javax.swing.*;
 import java.awt.*;
 import java.io.File;
+import java.net.URL;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class WebClonerGUI extends JFrame {
-
     private JTextField urlField;
     private JTextArea logArea;
     private JButton startButton;
+    private JButton stopButton;
     private JProgressBar progressBar;
+    private JLabel statsLabel;
+    private JSpinner threadsSpinner;
+    private JSpinner depthSpinner;
+    private JSpinner delaySpinner;
+    private AtomicBoolean stopRequested = new AtomicBoolean(false);
 
     public WebClonerGUI() {
-        setTitle("Clonador de Sitios Web");
-        setSize(800, 600);
+        setTitle("Clonador de Sitios Web Avanzado");
+        setSize(900, 700);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLocationRelativeTo(null); // Centrar la ventana
-
+        setLocationRelativeTo(null);
         initComponents();
         addListeners();
     }
@@ -24,14 +30,40 @@ public class WebClonerGUI extends JFrame {
     private void initComponents() {
         setLayout(new BorderLayout());
 
-        // Panel superior para la URL y el botón
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        topPanel.add(new JLabel("URL del sitio web:"));
+        // Panel de configuración
+        JPanel configPanel = new JPanel(new GridLayout(1, 4, 5, 5));
+        configPanel.add(new JLabel("Hilos:"));
+        threadsSpinner = new JSpinner(new SpinnerNumberModel(4, 1, 16, 1));
+        configPanel.add(threadsSpinner);
+        
+        configPanel.add(new JLabel("Profundidad:"));
+        depthSpinner = new JSpinner(new SpinnerNumberModel(3, 1, 10, 1));
+        configPanel.add(depthSpinner);
+        
+        configPanel.add(new JLabel("Retardo (ms):"));
+        delaySpinner = new JSpinner(new SpinnerNumberModel(200, 0, 5000, 100));
+        configPanel.add(delaySpinner);
+
+        // Panel superior
+        JPanel topPanel = new JPanel(new BorderLayout());
+        topPanel.add(configPanel, BorderLayout.NORTH);
+        
+        JPanel urlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        urlPanel.add(new JLabel("URL:"));
         urlField = new JTextField(40);
-        urlField.setText("https://www.example.com"); // URL por defecto
-        topPanel.add(urlField);
-        startButton = new JButton("Clonar Sitio");
-        topPanel.add(startButton);
+        urlField.setText("https://www.example.com");
+        urlPanel.add(urlField);
+        
+        startButton = new JButton("Iniciar");
+        stopButton = new JButton("Detener");
+        stopButton.setEnabled(false);
+        
+        JPanel buttonPanel = new JPanel();
+        buttonPanel.add(startButton);
+        buttonPanel.add(stopButton);
+        
+        urlPanel.add(buttonPanel);
+        topPanel.add(urlPanel, BorderLayout.CENTER);
         add(topPanel, BorderLayout.NORTH);
 
         // Área de log
@@ -40,85 +72,125 @@ public class WebClonerGUI extends JFrame {
         JScrollPane scrollPane = new JScrollPane(logArea);
         add(scrollPane, BorderLayout.CENTER);
 
-        // Barra de progreso
+        // Panel inferior
+        JPanel bottomPanel = new JPanel(new BorderLayout());
         progressBar = new JProgressBar();
         progressBar.setStringPainted(true);
-        add(progressBar, BorderLayout.SOUTH);
+        bottomPanel.add(progressBar, BorderLayout.CENTER);
+        
+        statsLabel = new JLabel("Listo");
+        statsLabel.setBorder(BorderFactory.createEmptyBorder(0, 10, 0, 10));
+        bottomPanel.add(statsLabel, BorderLayout.EAST);
+        add(bottomPanel, BorderLayout.SOUTH);
     }
 
     private void addListeners() {
-        startButton.addActionListener(e -> {
-            String startUrl = urlField.getText().trim();
-            if (startUrl.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "Por favor, introduce una URL.", "Error", JOptionPane.ERROR_MESSAGE);
-                return;
+        startButton.addActionListener(e -> startDownload());
+        stopButton.addActionListener(e -> stopRequested.set(true));
+    }
+
+    private void startDownload() {
+        String startUrl = urlField.getText().trim();
+        if (startUrl.isEmpty() || !isValidUrl(startUrl)) {
+            JOptionPane.showMessageDialog(this, "URL inválida", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        int threads = (int) threadsSpinner.getValue();
+        int depth = (int) depthSpinner.getValue();
+        long delay = ((Number) delaySpinner.getValue()).longValue();
+
+        stopRequested.set(false);
+        startButton.setEnabled(false);
+        stopButton.setEnabled(true);
+        logArea.setText("");
+        progressBar.setValue(0);
+        statsLabel.setText("Iniciando...");
+
+        new SwingWorker<Void, String>() {
+            private String clonedPath = "";
+            private long startTime;
+
+            @Override
+            protected Void doInBackground() {
+                startTime = System.currentTimeMillis();
+                try {
+                    WebCloner cloner = new WebCloner(
+                        this::publish,
+                        (current, total, active, queueSize) -> {
+                            int progress = total > 0 ? (int) ((double) current / total * 100) : 0;
+                            setProgress(progress);
+                            publish(String.format("[Progreso] %d/%d | Hilos: %d | Cola: %d", 
+                                current, total, active, queueSize));
+                        },
+                        threads, depth, delay
+                           
+                    );
+
+                    String outputDir = showDirectoryChooser();
+                    if (outputDir == null) {
+                        publish("Operación cancelada");
+                        return null;
+                    }
+
+                    clonedPath = cloner.downloadSite(startUrl, outputDir);
+                    if (clonedPath != null) {
+                        publish("Sitio clonado exitosamente en:\n" + clonedPath);
+                    }
+                } catch (Exception ex) {
+                    publish("[ERROR] " + ex.getMessage());
+                    ex.printStackTrace();
+                }
+                return null;
             }
 
-            // Deshabilitar botón mientras se clona
-            startButton.setEnabled(false);
-            logArea.setText(""); // Limpiar log anterior
-            progressBar.setValue(0);
-            log("Iniciando clonación de: " + startUrl);
+            @Override
+            protected void process(java.util.List<String> chunks) {
+                for (String message : chunks) {
+                    if (message.startsWith("[Progreso]")) {
+                        statsLabel.setText(message);
+                    } else {
+                        logArea.append(message + "\n");
+                    }
+                }
+                progressBar.setValue(getProgress());
+            }
 
-            // Ejecutar la clonación en un hilo separado con SwingWorker
-            new SwingWorker<Void, String>() {
-                private String clonedPath = "";
-
-                @Override
-                protected Void doInBackground() throws Exception {
+            @Override
+            protected void done() {
+                long duration = (System.currentTimeMillis() - startTime) / 1000;
+                statsLabel.setText(String.format("Completado en %d segundos", duration));
+                startButton.setEnabled(true);
+                stopButton.setEnabled(false);
+                
+                if (clonedPath != null && !clonedPath.isEmpty()) {
                     try {
-                        WebCloner cloner = new WebCloner(
-                            message -> publish(message), // Callback para logs
-                            (current, max) -> { // Callback para progreso
-                                // Calcular el porcentaje de progreso y publicarlo
-                                if (max > 0) {
-                                    int progressPercentage = (int) ((double) current / max * 100);
-                                    // Usar el método setProgress de SwingWorker
-                                    setProgress(progressPercentage);
-                                }
-                            }
-                        );
-                        String outputDir = System.getProperty("user.dir"); // Directorio actual
-                        clonedPath = cloner.downloadSite(startUrl, outputDir);
-                        publish("✅ Sitio clonado exitosamente en:\n" + clonedPath);
-                        publish("📂 Abre el archivo 'index.html' en esa carpeta para navegar localmente.");
-
+                        Desktop.getDesktop().open(new File(clonedPath));
                     } catch (Exception ex) {
-                        publish("[ERROR] " + ex.getMessage());
-                        ex.printStackTrace();
+                        log("No se pudo abrir la carpeta: " + ex.getMessage());
                     }
-                    return null;
                 }
+            }
+        }.execute();
+    }
 
-                @Override
-                protected void process(java.util.List<String> chunks) {
-                    // Este método se ejecuta en el EDT y es donde recibes las publicaciones de publish()
-                    for (String message : chunks) {
-                        log(message);
-                    }
-                    // Actualizar la barra de progreso aquí, el getProgress() es de SwingWorker
-                    progressBar.setValue(getProgress());
-                }
+    private String showDirectoryChooser() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Seleccionar directorio de destino");
+        if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            return chooser.getSelectedFile().getAbsolutePath();
+        }
+        return null;
+    }
 
-                @Override
-                protected void done() {
-                    startButton.setEnabled(true); // Habilitar botón de nuevo
-                    try {
-                        get(); // Para propagar cualquier excepción que haya ocurrido en doInBackground
-                    } catch (Exception ex) {
-                        log("[ERROR FATAL] " + ex.getMessage());
-                    }
-                    // Opcional: Abrir la carpeta donde se guardó el sitio
-                    if (!clonedPath.isEmpty()) {
-                        try {
-                            Desktop.getDesktop().open(new File(clonedPath));
-                        } catch (Exception ex) {
-                            log("No se pudo abrir la carpeta automáticamente: " + ex.getMessage());
-                        }
-                    }
-                }
-            }.execute(); // Iniciar el SwingWorker
-        });
+    private boolean isValidUrl(String url) {
+        try {
+            new URL(url).toURI();
+            return url.startsWith("http://") || url.startsWith("https://");
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void log(String message) {
@@ -127,7 +199,8 @@ public class WebClonerGUI extends JFrame {
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            new WebClonerGUI().setVisible(true);
+            WebClonerGUI gui = new WebClonerGUI();
+            gui.setVisible(true);
         });
     }
 }
